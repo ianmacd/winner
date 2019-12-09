@@ -718,6 +718,10 @@ struct self_display {
 
 	struct self_display_debug debug;
 
+	u8 *mask_crc_pass_data;	// implemented in dtsi
+	u8 *mask_crc_read_data;
+	int mask_crc_size;
+
 	/* Self display Function */
 	int (*init)(struct samsung_display_driver_data *vdd);
 	int (*data_init)(struct samsung_display_driver_data *vdd);
@@ -725,6 +729,7 @@ struct self_display {
 	int (*aod_exit)(struct samsung_display_driver_data *vdd);
 	void (*self_mask_img_write)(struct samsung_display_driver_data *vdd);
 	void (*self_mask_on)(struct samsung_display_driver_data *vdd, int enable);
+	int (*self_mask_check)(struct samsung_display_driver_data *vdd);
 	void (*self_blinking_on)(struct samsung_display_driver_data *vdd, int enable);
 	int (*self_display_debug)(struct samsung_display_driver_data *vdd);
 	void (*self_move_set)(struct samsung_display_driver_data *vdd, int ctrl);
@@ -1788,7 +1793,7 @@ static inline bool ss_is_panel_lpm(
 static inline int ss_is_read_cmd(enum dsi_cmd_set_type type)
 {
 	if ((type > RX_CMD_START && type < RX_CMD_END) ||
-			type == RX_SELF_DISP_DEBUG) {
+			(type == RX_SELF_DISP_DEBUG || type == RX_SELF_MASK_CHECK)) {
 		return 1;
 	}
 

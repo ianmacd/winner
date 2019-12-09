@@ -1709,7 +1709,8 @@ static ssize_t ss_self_move_store(struct device *dev,
 
 	mutex_lock(&display->display_lock);
 
-	sscanf(buf, "%d", &pattern);
+	if (sscanf(buf, "%d", &pattern) != 1)
+		goto end;
 
 	if (pattern < 0 || pattern > 4) {
 		LCD_ERR("invalid input");
@@ -1732,6 +1733,44 @@ end:
 
 	mutex_unlock(&display->display_lock);
 	return size;
+}
+
+static ssize_t ss_self_mask_check_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct samsung_display_driver_data *vdd =
+		(struct samsung_display_driver_data *)dev_get_drvdata(dev);
+	int i, len = 0, res = -1;
+
+	if (IS_ERR_OR_NULL(vdd)) {
+		LCD_ERR("no vdd");
+		res = -ENODEV;
+	}
+
+	if (!vdd->self_disp.is_support) {
+		LCD_ERR("self display is not supported..(%d) \n",
+								vdd->self_disp.is_support);
+		return -ENODEV;
+	}
+
+	if (vdd->self_disp.self_mask_check)
+		res = vdd->self_disp.self_mask_check(vdd);
+	else {
+		LCD_ERR("Do not support self mask check..\n");
+	}		
+
+	len += snprintf(buf + len, 60, "%d ", res);
+	
+	if (vdd->self_disp.mask_crc_size) {
+		for (i = 0; i < vdd->self_disp.mask_crc_size; i++) {
+			len += snprintf(buf + len, 60, "%02x ", vdd->self_disp.mask_crc_read_data[i]);
+			vdd->self_disp.mask_crc_read_data[i] = 0x00;
+		}
+	}
+
+	len += snprintf(buf + len, 60, "\n");
+
+	return strlen(buf);
 }
 
 static ssize_t ss_disp_partial_disp_show(struct device *dev,
@@ -3611,6 +3650,7 @@ static DEVICE_ATTR(self_mask, S_IRUGO | S_IWUSR | S_IWGRP, NULL, ss_self_mask_st
 static DEVICE_ATTR(dynamic_hlpm, S_IRUGO | S_IWUSR | S_IWGRP, NULL, ss_dynamic_hlpm_store);
 static DEVICE_ATTR(self_display, S_IRUGO | S_IWUSR | S_IWGRP, NULL, ss_self_display_store);
 static DEVICE_ATTR(self_move, S_IRUGO | S_IWUSR | S_IWGRP, NULL, ss_self_move_store);
+static DEVICE_ATTR(self_mask_check, S_IRUGO | S_IWUSR | S_IWGRP, ss_self_mask_check_show, NULL);
 static DEVICE_ATTR(read_copr, S_IRUGO | S_IWUSR | S_IWGRP, ss_read_copr_show, NULL);
 static DEVICE_ATTR(aid_log, S_IRUGO | S_IWUSR | S_IWGRP, ss_aid_log_show, ss_aid_log_store);
 static DEVICE_ATTR(gamma_interpolation_test, S_IRUGO | S_IWUSR | S_IWGRP, ss_aid_log_show, ss_gamma_interpolation_test_store);
@@ -3674,6 +3714,7 @@ static struct attribute *panel_sysfs_attributes[] = {
 	&dev_attr_dynamic_hlpm.attr,
 	&dev_attr_self_display.attr,
 	&dev_attr_self_move.attr,
+	&dev_attr_self_mask_check.attr,
 	&dev_attr_temperature.attr,
 	&dev_attr_lux.attr,
 	&dev_attr_partial_disp.attr,
