@@ -3185,6 +3185,26 @@ static void ss_panel_parse_dt(struct samsung_display_driver_data *vdd)
 	vdd->self_disp.is_support = of_property_read_bool(np, "samsung,support_self_display");
 	LCD_INFO("vdd->self_disp.is_support = %d\n", vdd->self_disp.is_support);
 
+	if (vdd->self_disp.is_support) {
+		/* Self Mask Check CRC data */	
+		data = of_get_property(np, "samsung,mask_crc_pass_data", &len);
+		if (!data)
+			LCD_ERR("fail to get samsung,mask_crc_pass_data .. \n");
+		else {
+			vdd->self_disp.mask_crc_pass_data = kzalloc(len, GFP_KERNEL);
+			vdd->self_disp.mask_crc_read_data = kzalloc(len, GFP_KERNEL);
+			vdd->self_disp.mask_crc_size = len;
+			if (!vdd->self_disp.mask_crc_pass_data || !vdd->self_disp.mask_crc_read_data)
+				LCD_ERR("fail to alloc for mask_crc_data \n");
+			else {
+				for (i = 0; i < len; i++) {
+					vdd->self_disp.mask_crc_pass_data[i] = data[i];
+					LCD_ERR("crc_data[%d] = %02x\n", i, vdd->self_disp.mask_crc_pass_data[i]);
+				}
+			}
+		}
+	}
+
 	/* DDI SPI */
 	vdd->samsung_support_ddi_spi = of_property_read_bool(np, "samsung,support_ddi_spi");
 	if (vdd->samsung_support_ddi_spi) {

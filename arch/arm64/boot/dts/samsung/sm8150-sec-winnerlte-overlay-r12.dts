@@ -7252,6 +7252,10 @@
 				samsung,self_dclock_hide = [29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 03 80 00 01 29 01 00 00 00 00 03 f0 a5 a5];
 				samsung,self_partial_hlpm_scan_set = <0x29010000 0x3f0 0x5a5a2901 0x0 0x1185131b 0xf0f0000 0x0 0x0 0x2901 0x0 0x3f0a5a5>;
 				samsung,self_disp_debug_rx_cmds = [06 01 00 00 00 00 01 7f 21 00];
+				samsung,self_mask_check_tx_pre1 = [29 01 00 00 00 00 03 9f a5 a5 29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 03 fc 5a 5a 29 01 00 00 00 00 03 b0 27 d8 29 01 00 00 00 00 02 d8 10 29 01 00 00 00 00 03 b0 25 fe 29 01 00 00 00 00 02 fe 08 29 01 00 00 00 00 0a bf 01 07 00 00 00 10 00 00 00 29 01 00 00 14 00 02 7a 00 29 01 00 00 00 00 02 75 10 29 01 00 00 00 00 03 fc a5 a5 29 01 00 00 00 00 03 f0 a5 a5 29 01 00 00 00 00 03 9f 5a 5a];
+				samsung,self_mask_check_tx_pre2 = <0x29010000 0x39f 0xa5a52901 0x0 0x3f05a5a 0x29010000 0x3fc 0x5a5a2901 0x0 0x2750129 0x1000022 0x107a21 0x2bb 0x53805ff 0x910ffff 0xffff2901 0x0 0x3fca5a5 0x29010000 0x3f0 0xa5a52901 0x0 0x39f5a5a>;
+				samsung,self_mask_check_rx_cmds = [06 01 00 00 00 00 01 14 02 00];
+				samsung,self_mask_check_tx_post = <0x29010000 0x39f 0xa5a52901 0x0 0x3f05a5a 0x29010000 0x3fc 0x5a5a2901 0x0 0x107a2106 0x66306 0x6406c709 0x10000000 0x290100 0xa 0xbf0007ff 0x1000 0x2901 0x0 0x3fca5a5 0x29010000 0x3f0 0xa5a52901 0x0 0x39f5a5a>;
 				phandle = <0xa2>;
 			};
 		};
@@ -7489,6 +7493,7 @@
 				samsung,self_idle_move_on_pattern3 = [29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 23 7d 10 01 02 00 00 10 01 50 05 10 01 50 05 10 01 50 05 10 01 50 05 10 01 00 00 00 00 00 00 00 00 00 00 00 29 01 00 00 00 00 03 f0 a5 a5];
 				samsung,self_idle_move_on_pattern4 = [29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 23 7d 10 01 02 00 00 10 01 50 05 10 01 50 05 10 01 50 05 10 01 50 05 10 01 00 00 00 00 00 00 00 00 00 00 00 29 01 00 00 00 00 03 f0 a5 a5];
 				samsung,self_idle_move_off = [29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 03 7d 00 00 29 01 00 00 00 00 03 f0 a5 a5];
+				samsung,mask_crc_pass_data = [58 6f];
 				qcom,display-type = "primary";
 				qcom,dsi-display-active;
 				qcom,dsi-ctrl-num = <0x0>;
@@ -7633,6 +7638,10 @@
 				samsung,self_dclock_blinking_off = [29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 03 79 00 00 29 01 00 00 00 00 03 f0 a5 a5];
 				samsung,self_clock_2c_sync_off = [29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 02 77 01 29 01 00 00 00 00 03 f0 a5 a5];
 				samsung,self_disp_debug_rx_cmds = [06 01 00 00 00 00 01 7f 12 00];
+				samsung,self_mask_check_tx_pre1 = <0x29010000 0x39f 0xa5a52901 0x0 0x3f05a5a 0x29010000 0x3fc 0x5a5a2901 0x0 0x2b01b29 0x1000000 0x2fe80 0x29010000 0x2b0 0x2f290100 0x2 0xfe252901 0x0 0x7bf0107 0x10 0x29010000 0x1400027a 0x290100 0x2 0x75102901 0x0 0x3fca5a5 0x29010000 0x3f0 0xa5a52901 0x0 0x39f5a5a>;
+				samsung,self_mask_check_tx_pre2 = [29 01 00 00 00 00 03 9f a5 a5 29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 03 fc 5a 5a 29 01 00 00 22 00 10 7a 01 00 00 00 95 01 f4 02 89 08 0c ff ff ff ff 29 01 00 00 00 00 03 fc a5 a5 29 01 00 00 00 00 03 f0 a5 a5 29 01 00 00 00 00 03 9f 5a 5a];
+				samsung,self_mask_check_rx_cmds = [06 01 00 00 00 00 01 fb 08 0c];
+				samsung,self_mask_check_tx_post = [29 01 00 00 00 00 03 9f a5 a5 29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 03 fc 5a 5a 29 01 00 00 00 00 10 7a 01 06 90 07 25 07 26 07 bb 08 0c 00 00 00 00 29 01 00 00 00 00 07 bf 00 07 ff 00 00 10 29 01 00 00 00 00 03 fc a5 a5 29 01 00 00 00 00 03 f0 a5 a5 29 01 00 00 00 00 03 9f 5a 5a];
 				phandle = <0xa3>;
 			};
 		};
@@ -7739,6 +7748,7 @@
 				samsung,ldi_debug1_rx_cmds_revA = [06 01 00 00 00 00 01 ed 01 00];
 				samsung,support_self_display;
 				ss,self_display = <0xa3>;
+				samsung,mask_crc_pass_data = <0x36bc61b6 0xa7f645f9>;
 				samsung,support_poc_driver;
 				samsung,poc_mca_check_rx_cmds_revA = [06 01 00 00 00 00 01 ec 0a 00];
 				samsung,lpm_on_tx_cmds_revA = [29 01 00 00 00 00 03 f0 5a 5a 29 01 00 00 00 00 03 b1 08 98 29 01 00 00 11 00 02 f7 03 29 01 00 00 00 00 05 bb 00 00 00 00 29 01 00 00 00 00 02 53 00 29 01 00 00 00 00 09 f4 bb 1e 17 3a 9f 0f 13 80 29 01 00 00 00 00 02 f7 03 29 01 00 00 00 00 03 f0 a5 a5];

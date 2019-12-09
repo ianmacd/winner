@@ -1871,7 +1871,11 @@ char *cmd_set_prop_map[SS_DSI_CMD_SET_MAX] = {
 	"samsung,self_video_on",
 	"samsung,self_video_of",
 	"samsung,self_partial_hlpm_scan_set",
-	"samsung,self_disp_debug_rx_cmds",
+	"samsung,self_disp_debug_rx_cmds",	
+	"samsung,self_mask_check_tx_pre1",
+	"samsung,self_mask_check_tx_pre2",
+	"samsung,self_mask_check_tx_post",
+	"samsung,self_mask_check_rx_cmds",
 	"TX_SELF_DISP_CMD_END not parsed from DTSI",
 
 	/*FLASH GAMMA */
