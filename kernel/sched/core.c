@@ -6389,11 +6389,6 @@ void __init sched_init(void)
 	int i, j;
 	unsigned long alloc_size = 0, ptr;
 
-#ifdef CONFIG_SEC_DEBUG
-	sec_gaf_supply_rqinfo(offsetof(struct rq, curr),
-		offsetof(struct cfs_rq, rq));
-#endif
-
 	sched_clock_init();
 	wait_bit_init();
 
