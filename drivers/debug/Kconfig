@@ -229,28 +229,11 @@ config SEC_QUEST_UEFI
 	bool "Samsung QUEST UEFI Feature"
 	default n
 	help
-	  Samsung QUEST UEFI Feature, to test chipset quality	  
+	  Samsung QUEST UEFI Feature, to test chipset quality
 
 config SEC_SKP
 	bool "Samsung SKP Feature"
 	default n
 	help
-	  Samsung SKP Feature, to test chipset quality	  	  
-
-choice
-	prompt "Version of GAF structure"
-	depends on SEC_DEBUG
-	default SEC_DEBUG_GAF_V5 if PROCA
-	default SEC_DEBUG_GAF_V4
-
-	config SEC_DEBUG_GAF_V4
-		bool "Use GAF structure version 4"
-		help
-		  Default option for kernel without PROCA LSM module.
-
-	config SEC_DEBUG_GAF_V5
-		bool "Use GAF structure version 5"
-		help
-		  Default option for kernel with PROCA LSM module.
-endchoice
+	  Samsung SKP Feature, to test chipset quality
 
