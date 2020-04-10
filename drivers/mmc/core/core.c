@@ -32,6 +32,7 @@
 #include <linux/of.h>
 #include <linux/pm.h>
 #include <linux/jiffies.h>
+#include <linux/sched/debug.h>
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
@@ -137,6 +138,26 @@ static bool mmc_is_data_request(struct mmc_request *mmc_request)
 		return false;
 	}
 }
+
+void mmc_cmdq_up_rwsem(struct mmc_host *host)
+{
+	struct mmc_cmdq_context_info *ctx = &host->cmdq_ctx;
+
+	up_read(&ctx->err_rwsem);
+}
+EXPORT_SYMBOL(mmc_cmdq_up_rwsem);
+
+int mmc_cmdq_down_rwsem(struct mmc_host *host, struct request *rq)
+{
+	struct mmc_cmdq_context_info *ctx = &host->cmdq_ctx;
+
+	down_read(&ctx->err_rwsem);
+	if (rq && !(rq->rq_flags & RQF_QUEUED))
+		return -EINVAL;
+	else
+		return 0;
+}
+EXPORT_SYMBOL(mmc_cmdq_down_rwsem);
 
 static void mmc_clk_scaling_start_busy(struct mmc_host *host, bool lock_needed)
 {
@@ -352,9 +373,19 @@ int mmc_cmdq_halt_on_empty_queue(struct mmc_host *host)
 {
 	int err = 0;
 
-	err = wait_event_interruptible(host->cmdq_ctx.queue_empty_wq,
-				(!host->cmdq_ctx.active_reqs));
-	if (host->cmdq_ctx.active_reqs) {
+	err = wait_event_interruptible_timeout(host->cmdq_ctx.queue_empty_wq,
+			(!host->cmdq_ctx.active_reqs),
+			msecs_to_jiffies(MMC_CMDQ_WAIT_EVENT_TIMEOUT_MS));
+
+	if (WARN_ON(!err && host->cmdq_ctx.active_reqs)) {
+		pr_err("%s: %s: timeout case? host-claimed(%d), claim-cnt(%d), claim-comm(%s), active-reqs(0x%lx)\n",
+			mmc_hostname(host), __func__, host->claimed,
+			host->claim_cnt, host->claimer->comm,
+			host->cmdq_ctx.active_reqs);
+		if (host->claimer)
+			sched_show_task(host->claimer);
+		return -EBUSY;
+	} else if (host->cmdq_ctx.active_reqs) {
 		pr_err("%s: %s: unexpected active requests (%lu)\n",
 			mmc_hostname(host), __func__,
 			host->cmdq_ctx.active_reqs);
@@ -430,12 +461,16 @@ int mmc_clk_update_freq(struct mmc_host *host,
 		goto invalid_state;
 	}
 
+	MMC_TRACE(host, "clock scale state %d freq %lu\n",
+			state, freq);
 	err = host->bus_ops->change_bus_speed(host, &freq);
 	if (!err)
 		host->clk_scaling.curr_freq = freq;
 	else
 		pr_err("%s: %s: failed (%d) at freq=%lu\n",
 			mmc_hostname(host), __func__, err, freq);
+	MMC_TRACE(host, "clock scale state %d freq %lu done with err %d\n",
+			state, freq, err);
 
 invalid_state:
 	if (cmdq_mode) {
@@ -679,6 +714,7 @@ out:
 int mmc_init_clk_scaling(struct mmc_host *host)
 {
 	int err;
+	struct devfreq *devfreq;
 
 	if (!host || !host->card) {
 		pr_err("%s: unexpected host/card parameters\n",
@@ -734,17 +770,20 @@ int mmc_init_clk_scaling(struct mmc_host *host)
 		host->clk_scaling.ondemand_gov_data.upthreshold,
 		host->clk_scaling.ondemand_gov_data.downdifferential,
 		host->clk_scaling.devfreq_profile.polling_ms);
-	host->clk_scaling.devfreq = devfreq_add_device(
+
+	devfreq = devfreq_add_device(
 		mmc_classdev(host),
 		&host->clk_scaling.devfreq_profile,
 		"simple_ondemand",
 		&host->clk_scaling.ondemand_gov_data);
-	if (!host->clk_scaling.devfreq) {
+
+	if (IS_ERR(devfreq)) {
 		pr_err("%s: unable to register with devfreq\n",
 			mmc_hostname(host));
-		return -EPERM;
+		return PTR_ERR(devfreq);
 	}
 
+	host->clk_scaling.devfreq = devfreq;
 	pr_debug("%s: clk scaling is enabled for device %s (%p) with devfreq %p (clock = %uHz)\n",
 		mmc_hostname(host),
 		dev_name(mmc_classdev(host)),
@@ -753,6 +792,7 @@ int mmc_init_clk_scaling(struct mmc_host *host)
 		host->ios.clock);
 
 	host->clk_scaling.enable = true;
+	host->clk_scaling.is_suspended = false;
 
 	return err;
 }
@@ -847,6 +887,7 @@ int mmc_resume_clk_scaling(struct mmc_host *host)
 	host->clk_scaling.curr_freq = devfreq_max_clk;
 	if (host->ios.clock < host->clk_scaling.freq_table[max_clk_idx])
 		host->clk_scaling.curr_freq = devfreq_min_clk;
+	host->clk_scaling.target_freq = host->clk_scaling.curr_freq;
 
 	err = devfreq_resume_device(host->clk_scaling.devfreq);
 	if (err) {
@@ -1829,14 +1870,15 @@ int mmc_cmdq_wait_for_dcmd(struct mmc_host *host,
 	struct mmc_command *cmd = mrq->cmd;
 	int err = 0;
 
-	init_completion(&mrq->completion);
 	mrq->done = mmc_cmdq_dcmd_req_done;
 	err = mmc_cmdq_start_req(host, cmdq_req);
 	if (err)
 		return err;
 
+	mmc_cmdq_up_rwsem(host);
 	wait_for_completion_io(&mrq->completion);
-	if (cmd->error) {
+	err = mmc_cmdq_down_rwsem(host, mrq->req);
+	if (err || cmd->error) {
 		pr_err("%s: DCMD %d failed with err %d\n",
 				mmc_hostname(host), cmd->opcode,
 				cmd->error);
@@ -3107,7 +3149,7 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * This delay should be sufficient to allow the power supply
 	 * to reach the minimum voltage.
 	 */
-	mmc_delay(10);
+	mmc_delay(host->ios.power_delay_ms);
 
 	mmc_pwrseq_post_power_on(host);
 
@@ -3120,7 +3162,7 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * This delay must be at least 74 clock sizes, or 1 ms, or the
 	 * time required to reach a stable voltage.
 	 */
-	mmc_delay(10);
+	mmc_delay(host->ios.power_delay_ms);
 
 	mmc_host_clk_release(host);
 }
@@ -3200,6 +3242,7 @@ int mmc_resume_bus(struct mmc_host *host)
 {
 	unsigned long flags;
 	int err = 0;
+	int card_present = true;
 
 	if (!mmc_bus_needs_resume(host))
 		return -EINVAL;
@@ -3213,23 +3256,30 @@ int mmc_resume_bus(struct mmc_host *host)
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	mmc_bus_get(host);
-	if (host->bus_ops && !host->bus_dead && host->card) {
+	if (host->ops->get_cd) {
+		card_present = host->ops->get_cd(host);
+		if (!card_present) {
+			pr_err("%s: Card removed - card_present:%d\n",
+			       mmc_hostname(host), card_present);
+			if (host->card)
+				mmc_card_set_removed(host->card);
+		}
+	}
+
+	if (host->bus_ops && !host->bus_dead && host->card && card_present) {
 		mmc_power_up(host, host->card->ocr);
 		BUG_ON(!host->bus_ops->resume);
 		err = host->bus_ops->resume(host);
-		if (err) {
-			pr_err("%s: %s: resume failed: %d\n",
-				       mmc_hostname(host), __func__, err);
-			/*
-			 * If we have cd-gpio based detection mechanism and
-			 * deferred resume is supported, we will not detect
-			 * card removal event when system is suspended. So if
-			 * resume fails after a system suspend/resume,
-			 * schedule the work to detect card presence.
-			 */
-			if (mmc_card_is_removable(host) &&
-					!(host->caps & MMC_CAP_NEEDS_POLL)) {
-				mmc_detect_change(host, 0);
+		if (err && (err != -ENOMEDIUM)) {
+			pr_err("%s: bus resume: failed: %d\n",
+			       mmc_hostname(host), err);
+			err = mmc_hw_reset(host);
+			if (err) {
+				pr_err("%s: reset: failed: %d\n",
+				       mmc_hostname(host), err);
+				goto err_reset;
+			} else {
+				mmc_card_clr_suspended(host->card);
 			}
 		}
 		if (mmc_card_cmdq(host->card)) {
@@ -3237,15 +3287,14 @@ int mmc_resume_bus(struct mmc_host *host)
 			if (err)
 				pr_err("%s: %s: unhalt failed: %d\n",
 				       mmc_hostname(host), __func__, err);
-			else
-				mmc_card_clr_suspended(host->card);
 		}
 	}
 
+err_reset:
 	mmc_bus_put(host);
 	pr_debug("%s: Deferred resume completed\n", mmc_hostname(host));
 	wake_unlock(&host->detect_wake_lock);
-	return 0;
+	return err;
 }
 EXPORT_SYMBOL(mmc_resume_bus);
 
@@ -3532,7 +3581,7 @@ static int mmc_cmdq_send_erase_cmd(struct mmc_cmdq_req *cmdq_req,
 	if (err) {
 		pr_err("mmc_erase: group start error %d, status %#x\n",
 				err, cmd->resp[0]);
-		return -EIO;
+		return err;
 	}
 	return 0;
 }

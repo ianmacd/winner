@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -49,6 +49,7 @@ struct msm_audio_ion_private {
 	struct mutex list_mutex;
 	u64 smmu_sid_bits;
 	u32 smmu_version;
+	u32 iova_start_addr;
 };
 
 struct msm_audio_alloc_data {
@@ -413,6 +414,43 @@ err:
 EXPORT_SYMBOL(msm_audio_ion_alloc);
 
 /**
+ * msm_audio_ion_dma_map -
+ *        Memory maps for a given DMA buffer
+ *
+ * @phys_addr: Physical address of DMA buffer to be mapped
+ * @iova_base: IOVA address of memory mapped DMA buffer
+ * @size: buffer size
+ * @dir: DMA direction
+ * Returns 0 on success or error on failure
+ */
+int msm_audio_ion_dma_map(dma_addr_t *phys_addr, dma_addr_t *iova_base,
+			u32 size, enum dma_data_direction dir)
+{
+	dma_addr_t iova;
+	struct device *cb_dev = msm_audio_ion_data.cb_dev;
+
+	if (!phys_addr || !iova_base || !size)
+		return -EINVAL;
+
+	iova = dma_map_resource(cb_dev, *phys_addr, size,
+				dir, 0);
+	if (dma_mapping_error(cb_dev, iova)) {
+		pr_err("%s: dma_mapping_error\n", __func__);
+		return -EIO;
+	}
+	pr_debug("%s: dma_mapping_success iova:0x%lx\n", __func__,
+			 (unsigned long)iova);
+	if (msm_audio_ion_data.smmu_enabled)
+		/* Append the SMMU SID information to the IOVA address */
+		iova |= msm_audio_ion_data.smmu_sid_bits;
+
+	*iova_base = iova;
+
+	return 0;
+}
+EXPORT_SYMBOL(msm_audio_ion_dma_map);
+
+/**
  * msm_audio_ion_import-
  *        Import ION buffer with given file descriptor
  *
@@ -663,7 +701,7 @@ static int msm_audio_smmu_init(struct device *dev)
 	int ret;
 
 	mapping = arm_iommu_create_mapping(&platform_bus_type,
-					   MSM_AUDIO_ION_VA_START,
+					   msm_audio_ion_data.iova_start_addr,
 					   MSM_AUDIO_ION_VA_LEN);
 	if (IS_ERR(mapping))
 		return PTR_ERR(mapping);
@@ -699,6 +737,7 @@ static int msm_audio_ion_probe(struct platform_device *pdev)
 	u64 smmu_sid_mask = 0;
 	const char *msm_audio_ion_dt = "qcom,smmu-enabled";
 	const char *msm_audio_ion_smmu = "qcom,smmu-version";
+	const char *msm_audio_ion_iova_start_addr = "qcom,iova-start-addr";
 	const char *msm_audio_ion_smmu_sid_mask = "qcom,smmu-sid-mask";
 	bool smmu_enabled;
 	enum apr_subsys_state q6_state;
@@ -744,6 +783,18 @@ static int msm_audio_ion_probe(struct platform_device *pdev)
 	dev_dbg(dev, "%s: SMMU is Enabled. SMMU version is (%d)",
 		__func__, msm_audio_ion_data.smmu_version);
 
+	rc = of_property_read_u32(dev->of_node,
+				msm_audio_ion_iova_start_addr,
+				&msm_audio_ion_data.iova_start_addr);
+	if (rc) {
+		dev_dbg(dev,
+			"%s: qcom,iova_start_addr missing in DT node, initialize with default val\n",
+			__func__);
+		msm_audio_ion_data.iova_start_addr = MSM_AUDIO_ION_VA_START;
+	} else {
+		dev_dbg(dev, "%s:IOVA start addr: 0x%x\n",
+			__func__, msm_audio_ion_data.iova_start_addr);
+	}
 	/* Get SMMU SID information from Devicetree */
 	rc = of_property_read_u64(dev->of_node,
 				  msm_audio_ion_smmu_sid_mask,

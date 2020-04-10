@@ -106,7 +106,18 @@
 		qcom,mdss-dsi-mdp-trigger = "none";
 		qcom,mdss-dsi-dma-trigger = "trigger_sw";
 		qcom,mdss-dsi-panel-framerate = <60>;
-		//qcom,mdss-dsi-panel-clockrate = <898000000>;
+
+		/* h_period = DSI_H_ACTIVE_DSC(timing); => qcom,mdss-dsi-panel-width / 3
+		 * v_period = timing->v_active;
+		 *
+		 * bit_rate = h_period * v_period * ROUNDDOWN(1000000 / mdp_transfer_time_us) * bpp
+		 * 3572121600 = 480 * 3040 * ROUNDDOWN(1000000 / 9754) * 24
+		 * bit_clk_rate_per_line = 3572121600 / 4 = 893030400 / 1000000 = 893.03 Mbps
+		 */
+		//qcom,mdss-mdp-transfer-time-us = <9754>;
+		
+		/* To get exact bit_rate, have to use qcom,mdss-dsi-panel-clockrate */
+		qcom,mdss-dsi-panel-clockrate = <897600000>;
 
 		qcom,mdss-pan-physical-width-dimension = <72>; /* 72.432mm, round-off */
 		qcom,mdss-pan-physical-height-dimension = <153>; /* 152.912mm, round-up */
@@ -947,7 +958,7 @@
 				0F 02 00 00 00 00 00 00
 				00 00 00 00 00 00 00 27
 				93 00 00 00 00 00 00 00
-				00 00 00 00 00 14 9B 00
+				00 14 00 00 00 14 9B 00
 				36 00 00 00 1A FA FA BB
 				99 97 A6 AF A7 62 7A 5A
 				9A 9A 9A 9B
@@ -972,7 +983,7 @@
 				0B 06 00 00 00 00 00 00
 				00 00 00 00 00 00 00 27
 				93 00 00 00 00 00 00 00
-				00 00 00 00 00 14 9B 00
+				00 14 00 00 00 14 9B 00
 				00 00 00 00 1A FA FA BA
 				99 97 A6 AF A7 62 7A 5A
 				9A 9A 9A 9A
@@ -2157,6 +2168,19 @@
 
 		samsung,hmt_enable_tx_cmds_revA = [
 			29 01 00 00 00 00 03 F0 5A 5A
+
+			29 01 00 00 00 00 49 CB				/* LTPS setting */
+				44 00 01 01 09 67 89 09
+				00 00 00 00 00 00 00 00
+				0b 06 00 00 00 00 00 00
+				00 00 00 00 00 00 00 27
+				93 00 00 00 00 00 00 00
+				00 14 00 00 00 14 9b 00
+				00 00 00 00 1a fa fa ba
+				99 97 a6 af a7 62 7a 5a
+				9a 9a 9a 9a 99 97 c6 cf
+			29 01 00 00 14 00 02 F7 03			/* Gamma, LTPS(AID) update */
+			
 			29 01 00 00 00 00 05 B1 08 61 14 00	/* AID 1-Cycle */
 			29 01 00 00 00 00 03 F0 A5 A5
 		];
@@ -2306,6 +2330,11 @@
 				qcom,mdss-dsi-v-back-porch = <124>;
 				qcom,mdss-dsi-v-front-porch = <124>;
 				qcom,mdss-dsi-panel-framerate = <60>;
+				//qcom,mdss-mdp-transfer-time-us = <9754>;
+
+				/* To get exact bit_rate, have to use qcom,mdss-dsi-panel-clockrate */
+				qcom,mdss-dsi-panel-clockrate = <897600000>;
+				
 				//qcom,mdss-dsi-panel-phy-timings = [00 21 09 09 24 23 08 08 08 03 04 00];
 				qcom,mdss-dsi-panel-phy-timings = [00 1E 08 08 24 22 08 08 05 03 04 00 19 18];
 				qcom,mdss-dsi-timing-switch-command = [
@@ -2475,6 +2504,11 @@
 				qcom,mdss-dsi-v-back-porch = <124>;
 				qcom,mdss-dsi-v-front-porch = <796>;
 				qcom,mdss-dsi-panel-framerate = <60>;
+				//qcom,mdss-mdp-transfer-time-us = <5486>;
+
+				/* To get exact bit_rate, have to use qcom,mdss-dsi-panel-clockrate */
+				qcom,mdss-dsi-panel-clockrate = <897600000>;
+				
 //				qcom,mdss-dsi-panel-phy-timings = [00 21 09 09 24 23 08 08 08 03 04 00];
 				qcom,mdss-dsi-panel-phy-timings = [00 1E 08 08 24 22 08 08 05 03 04 00 19 18];
 				qcom,mdss-dsi-timing-switch-command = [
@@ -2643,6 +2677,11 @@
 				qcom,mdss-dsi-v-back-porch = <124>;
 				qcom,mdss-dsi-v-front-porch = <1556>;
 				qcom,mdss-dsi-panel-framerate = <60>;
+				//qcom,mdss-mdp-transfer-time-us = <2438>;
+
+				/* To get exact bit_rate, have to use qcom,mdss-dsi-panel-clockrate */
+				qcom,mdss-dsi-panel-clockrate = <897600000>;
+
 //				qcom,mdss-dsi-panel-phy-timings = [00 21 09 09 24 23 08 08 08 03 04 00];
 				qcom,mdss-dsi-panel-phy-timings = [00 1E 08 08 24 22 08 08 05 03 04 00 19 18];
 

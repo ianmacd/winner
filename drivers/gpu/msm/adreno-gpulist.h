@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -397,7 +397,7 @@ static const struct adreno_gpu_core adreno_gpulist[] = {
 		.busy_mask = 0xFFFFFFFE,
 		.gpmufw_name = "a630_gmu.bin",
 		.gpmu_major = 0x1,
-		.gpmu_minor = 0x003,
+		.gpmu_minor = 0x007,
 	},
 	{
 		.gpurev = ADRENO_REV_A640,
@@ -429,7 +429,7 @@ static const struct adreno_gpu_core adreno_gpulist[] = {
 		.patchid = ANY_ID,
 		.features = ADRENO_64BIT | ADRENO_RPMH | ADRENO_GPMU |
 			ADRENO_CONTENT_PROTECTION | ADRENO_IOCOHERENT |
-			ADRENO_IFPC | ADRENO_PREEMPTION,
+			ADRENO_IFPC | ADRENO_PREEMPTION | ADRENO_ACD,
 		.sqefw_name = "a630_sqe.fw",
 		.zap_name = "a640_zap",
 		.gpudev = &adreno_a6xx_gpudev,
@@ -462,21 +462,21 @@ static const struct adreno_gpu_core adreno_gpulist[] = {
 		.max_power = 5448,
 	},
 	{
-		.gpurev = ADRENO_REV_A608,
+		.gpurev = ADRENO_REV_A612,
 		.core = 6,
-		.major = 0,
-		.minor = 8,
+		.major = 1,
+		.minor = 2,
 		.patchid = ANY_ID,
 		.features = ADRENO_64BIT | ADRENO_CONTENT_PROTECTION |
 			ADRENO_IOCOHERENT | ADRENO_PREEMPTION | ADRENO_GPMU |
-			ADRENO_IFPC,
+			ADRENO_IFPC | ADRENO_PERFCTRL_RETAIN,
 		.sqefw_name = "a630_sqe.fw",
-		.zap_name = "a608_zap",
+		.zap_name = "a612_zap",
 		.gpudev = &adreno_a6xx_gpudev,
 		.gmem_size = (SZ_128K + SZ_4K),
 		.num_protected_regs = 0x20,
 		.busy_mask = 0xFFFFFFFE,
-		.gpmufw_name = "a608_rgmu.bin",
+		.gpmufw_name = "a612_rgmu.bin",
 		.cx_ipeak_gpu_freq = 745000000,
 	},
 	{
@@ -497,5 +497,21 @@ static const struct adreno_gpu_core adreno_gpulist[] = {
 		.gpmufw_name = "a630_gmu.bin",
 		.gpmu_major = 0x1,
 		.gpmu_minor = 0x003,
+	},
+	{
+		.gpurev = ADRENO_REV_A610,
+		.core = 6,
+		.major = 1,
+		.minor = 0,
+		.patchid = ANY_ID,
+		.features = ADRENO_64BIT | ADRENO_PREEMPTION |
+			ADRENO_CONTENT_PROTECTION,
+		.sqefw_name = "a630_sqe.fw",
+		.zap_name = "a610_zap",
+		.gpudev = &adreno_a6xx_gpudev,
+		.gmem_size = (SZ_128K + SZ_4K),
+		.num_protected_regs = 0x20,
+		.busy_mask = 0xFFFFFFFE,
+		.cx_ipeak_gpu_freq = 900000000,
 	},
 };

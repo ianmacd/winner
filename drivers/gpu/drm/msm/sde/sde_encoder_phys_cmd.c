@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -231,6 +231,7 @@ static void sde_encoder_phys_cmd_pp_tx_done_irq(void *arg, int irq_idx)
 				phys_enc,
 				SDE_ENCODER_FRAME_EVENT_SIGNAL_RETIRE_FENCE);
 		atomic_add_unless(&phys_enc->pending_ctlstart_cnt, -1, 0);
+		atomic_set(&phys_enc->ctlstart_timeout, 0);
 	}
 
 	/* notify all synchronous clients first, then asynchronous clients */
@@ -336,6 +337,7 @@ static void sde_encoder_phys_cmd_ctl_start_irq(void *arg, int irq_idx)
 
 	ctl = phys_enc->hw_ctl;
 	atomic_add_unless(&phys_enc->pending_ctlstart_cnt, -1, 0);
+	atomic_set(&phys_enc->ctlstart_timeout, 0);
 
 	time_diff_us = ktime_us_delta(ktime_get(), cmd_enc->rd_ptr_timestamp);
 
@@ -396,6 +398,7 @@ static void _sde_encoder_phys_cmd_setup_irq_hw_idx(
 		struct sde_encoder_phys *phys_enc)
 {
 	struct sde_encoder_irq *irq;
+	int ret = 0;
 
 	if (!phys_enc || !phys_enc->hw_pp || !phys_enc->hw_ctl) {
 		SDE_ERROR("invalid args %d %d\n", !phys_enc,
@@ -407,6 +410,22 @@ static void _sde_encoder_phys_cmd_setup_irq_hw_idx(
 		SDE_ERROR("invalid intf configuration\n");
 		return;
 	}
+
+	mutex_lock(phys_enc->vblank_ctl_lock);
+
+	if (atomic_read(&phys_enc->vblank_refcount)) {
+		SDE_ERROR(
+		"vblank_refcount mismatch detected, try to reset %d\n",
+				atomic_read(&phys_enc->vblank_refcount));
+		ret = sde_encoder_helper_unregister_irq(phys_enc,
+				INTR_IDX_RDPTR);
+		if (ret)
+			SDE_ERROR(
+			"control vblank irq registration error %d\n",
+				ret);
+	}
+
+	atomic_set(&phys_enc->vblank_refcount, 0);
 
 	irq = &phys_enc->irq[INTR_IDX_CTL_START];
 	irq->hw_idx = phys_enc->hw_ctl->idx;
@@ -433,6 +452,8 @@ static void _sde_encoder_phys_cmd_setup_irq_hw_idx(
 		irq->hw_idx = phys_enc->hw_intf->idx;
 	else
 		irq->hw_idx = phys_enc->hw_pp->idx;
+
+	mutex_unlock(phys_enc->vblank_ctl_lock);
 }
 
 static void sde_encoder_phys_cmd_cont_splash_mode_set(
@@ -548,6 +569,38 @@ static int _sde_encoder_phys_cmd_handle_ppdone_timeout(
 	cmd_enc->pp_timeout_report_cnt++;
 	pending_kickoff_cnt = atomic_read(&phys_enc->pending_kickoff_cnt);
 
+#if defined(CONFIG_DISPLAY_SAMSUNG)
+	SS_XLOG(cmd_enc->pp_timeout_report_cnt);
+	phys_enc->sde_kms->base.funcs->ss_callback(PRIMARY_DISPLAY_NDX,
+		SS_EVENT_CHECK_TE, (void *)phys_enc);
+	inc_dpui_u32_field(DPUI_KEY_QCT_PPTO, 1);
+	SDE_EVT32(DRMID(phys_enc->parent), phys_enc->hw_pp->idx - PINGPONG_0,
+		cmd_enc->pp_timeout_report_cnt,
+		pending_kickoff_cnt,
+		frame_event);
+#if 1
+	if (sec_debug_is_enabled()) // Debug Level MID or HIGH
+	{
+		SDE_ERROR_CMDENC(cmd_enc,
+			"pp:%d kickoff timed out ctl %d koff_cnt %d\n",
+			phys_enc->hw_pp->idx - PINGPONG_0,
+			phys_enc->hw_ctl->idx - CTL_0,
+			pending_kickoff_cnt);
+		SDE_DBG_DUMP("all", "dbg_bus", "vbif_dbg_bus", "panic");
+	}
+#endif
+	/* decrement the kickoff_cnt before checking for ESD status */
+	atomic_add_unless(&phys_enc->pending_kickoff_cnt, -1, 0);
+
+	pr_err("%s (%d): pp_timeout_report_cnt: %d\n", __func__, __LINE__, cmd_enc->pp_timeout_report_cnt);
+	if (cmd_enc->pp_timeout_report_cnt < 10) {
+		/* request a ctl reset before the next kickoff */
+		phys_enc->enable_state = SDE_ENC_ERR_NEEDS_HW_RESET;
+		pr_err("%s (%d): ignore pp & phy_hw_reset\n", __func__, __LINE__);
+		goto exit;
+	}
+#endif
+
 	if (sde_encoder_phys_cmd_is_master(phys_enc)) {
 		 /* trigger the retire fence if it was missed */
 		if (atomic_add_unless(&phys_enc->pending_retire_fence_cnt,
@@ -564,20 +617,8 @@ static int _sde_encoder_phys_cmd_handle_ppdone_timeout(
 			pending_kickoff_cnt,
 			frame_event);
 
-#if defined(CONFIG_DISPLAY_SAMSUNG)
-	SS_XLOG(cmd_enc->pp_timeout_report_cnt);
-#endif
-
 	/* decrement the kickoff_cnt before checking for ESD status */
 	atomic_add_unless(&phys_enc->pending_kickoff_cnt, -1, 0);
-
-#if defined(CONFIG_DISPLAY_SAMSUNG)
-	pr_err("%s (%d): pp_timeout_report_cnt: %d\n", __func__, __LINE__, cmd_enc->pp_timeout_report_cnt);
-	if (cmd_enc->pp_timeout_report_cnt < 10) {
-		pr_err("%s (%d): ignore pp\n", __func__, __LINE__);
-		goto exit;
-	}
-#endif
 
 	/* check if panel is still sending TE signal or not */
 	if (sde_connector_esd_status(phys_enc->connector) ||
@@ -595,6 +636,10 @@ static int _sde_encoder_phys_cmd_handle_ppdone_timeout(
 		SDE_EVT32(DRMID(phys_enc->parent), SDE_EVTLOG_FATAL);
 		SDE_DBG_DUMP("all", "dbg_bus", "vbif_dbg_bus", "panic");
 		sde_encoder_helper_unregister_irq(phys_enc, INTR_IDX_RDPTR);
+		if (sde_kms_is_secure_session_inprogress(phys_enc->sde_kms))
+			SDE_DBG_DUMP("secure");
+		else
+			SDE_DBG_DUMP("all", "dbg_bus", "vbif_dbg_bus");
 		sde_encoder_helper_register_irq(phys_enc, INTR_IDX_RDPTR);
 	}
 
@@ -608,7 +653,7 @@ static int _sde_encoder_phys_cmd_handle_ppdone_timeout(
 		sde_connector_event_notify(conn, DRM_EVENT_SDE_HW_RECOVERY,
 				sizeof(uint8_t), event);
 	} else if (cmd_enc->pp_timeout_report_cnt) {
-		SDE_DBG_DUMP("panic");
+		SDE_DBG_DUMP("dsi_dbg_bus", "panic");
 	}
 
 	/* request a ctl reset before the next kickoff */
@@ -762,11 +807,7 @@ static int _sde_encoder_phys_cmd_wait_for_idle(
 
 	wait_info.wq = &phys_enc->pending_kickoff_wq;
 	wait_info.atomic_cnt = &phys_enc->pending_kickoff_cnt;
-#if defined(CONFIG_DISPLAY_SAMSUNG)
-	wait_info.timeout_ms = PP_TIMEOUT_MS;
-#else
 	wait_info.timeout_ms = KICKOFF_TIMEOUT_MS;
-#endif
 	recovery_events = sde_encoder_recovery_events_enabled(
 			phys_enc->parent);
 
@@ -862,11 +903,17 @@ static int sde_encoder_phys_cmd_control_vblank_irq(
 	SDE_EVT32(DRMID(phys_enc->parent), phys_enc->hw_pp->idx - PINGPONG_0,
 			enable, refcount);
 
-	if (enable && atomic_inc_return(&phys_enc->vblank_refcount) == 1)
+	if (enable && atomic_inc_return(&phys_enc->vblank_refcount) == 1) {
 		ret = sde_encoder_helper_register_irq(phys_enc, INTR_IDX_RDPTR);
-	else if (!enable && atomic_dec_return(&phys_enc->vblank_refcount) == 0)
+		if (ret)
+			atomic_dec_return(&phys_enc->vblank_refcount);
+	} else if (!enable &&
+			atomic_dec_return(&phys_enc->vblank_refcount) == 0) {
 		ret = sde_encoder_helper_unregister_irq(phys_enc,
 				INTR_IDX_RDPTR);
+		if (ret)
+			atomic_inc_return(&phys_enc->vblank_refcount);
+	}
 
 end:
 	if (ret) {
@@ -1072,7 +1119,11 @@ static void sde_encoder_phys_cmd_tearcheck_config(
 	 * disable sde hw generated TE signal, since hw TE will arrive first.
 	 * Only caveat is if due to error, we hit wrap-around.
 	 */
+#if defined(CONFIG_DISPLAY_SAMSUNG)
+	tc_cfg.sync_cfg_height = mode->vtotal * 3;// 3* 16.6ms based on mode->vtotal
+#else
 	tc_cfg.sync_cfg_height = 0xFFF0;
+#endif
 	tc_cfg.vsync_init_val = mode->vdisplay;
 	tc_cfg.sync_threshold_start = _get_tearcheck_threshold(phys_enc,
 			&extra_frame_trigger_time);
@@ -1134,8 +1185,8 @@ static void _sde_encoder_phys_cmd_pingpong_config(
 			phys_enc->hw_pp->idx - PINGPONG_0);
 	drm_mode_debug_printmodeline(&phys_enc->cached_mode);
 
-	if (!_sde_encoder_phys_is_ppsplit_slave(phys_enc))
-		_sde_encoder_phys_cmd_update_intf_cfg(phys_enc);
+	_sde_encoder_phys_cmd_update_intf_cfg(phys_enc);
+
 	sde_encoder_phys_cmd_tearcheck_config(phys_enc);
 }
 
@@ -1151,18 +1202,8 @@ static void sde_encoder_phys_cmd_enable_helper(
 
 	_sde_encoder_phys_cmd_pingpong_config(phys_enc);
 
-	/*
-	 * For pp-split, skip setting the flush bit for the slave intf, since
-	 * both intfs use same ctl and HW will only flush the master.
-	 */
-	if (_sde_encoder_phys_is_ppsplit(phys_enc) &&
-		!sde_encoder_phys_cmd_is_master(phys_enc))
-		goto skip_flush;
-
 	_sde_encoder_phys_cmd_update_flush_mask(phys_enc);
 
-skip_flush:
-	return;
 }
 
 static void sde_encoder_phys_cmd_enable(struct sde_encoder_phys *phys_enc)
@@ -1311,6 +1352,7 @@ static void sde_encoder_phys_cmd_disable(struct sde_encoder_phys *phys_enc)
 		SDE_ERROR("invalid encoder\n");
 		return;
 	}
+	atomic_set(&phys_enc->ctlstart_timeout, 0);
 	SDE_DEBUG_CMDENC(cmd_enc, "pp %d intf %d state %d\n",
 			phys_enc->hw_pp->idx - PINGPONG_0,
 			phys_enc->hw_intf->idx - INTF_0,
@@ -1457,11 +1499,33 @@ static int _sde_encoder_phys_cmd_wait_for_ctl_start(
 		if (ctl && ctl->ops.get_start_state)
 			frame_pending = ctl->ops.get_start_state(ctl);
 
-		if (frame_pending)
+		if (frame_pending) {
 			SDE_ERROR_CMDENC(cmd_enc,
 					"ctl start interrupt wait failed\n");
+			SDE_DBG_DUMP("all", "dbg_bus", "vbif_dbg_bus","panic");
+		}
 		else
 			ret = 0;
+
+		if (sde_encoder_phys_cmd_is_master(phys_enc)) {
+			/*
+			 * Signaling the retire fence at ctl start timeout
+			 * to allow the next commit and avoid device freeze.
+			 * As ctl start timeout can occurs due to no read ptr,
+			 * updating pending_rd_ptr_cnt here may not cover all
+			 * cases. Hence signaling the retire fence.
+			 */
+			if (atomic_add_unless(
+			 &phys_enc->pending_retire_fence_cnt, -1, 0))
+				phys_enc->parent_ops.handle_frame_done(
+				 phys_enc->parent,
+				 phys_enc,
+				 SDE_ENCODER_FRAME_EVENT_SIGNAL_RETIRE_FENCE);
+			atomic_add_unless(
+				&phys_enc->pending_ctlstart_cnt, -1, 0);
+			atomic_inc_return(&phys_enc->ctlstart_timeout);
+		}
+
 	}
 
 	return ret;
@@ -1789,6 +1853,7 @@ struct sde_encoder_phys *sde_encoder_phys_cmd_init(
 	atomic_set(&phys_enc->pending_retire_fence_cnt, 0);
 	atomic_set(&cmd_enc->pending_rd_ptr_cnt, 0);
 	atomic_set(&cmd_enc->pending_vblank_cnt, 0);
+	atomic_set(&phys_enc->ctlstart_timeout, 0);
 	init_waitqueue_head(&phys_enc->pending_kickoff_wq);
 	init_waitqueue_head(&cmd_enc->pending_vblank_wq);
 	atomic_set(&cmd_enc->autorefresh.kickoff_cnt, 0);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -85,6 +85,7 @@ struct dp_ctrl_private {
 	bool orientation;
 	bool power_on;
 	bool mst_mode;
+	bool fec_mode;
 
 	atomic_t aborted;
 
@@ -113,7 +114,7 @@ static void dp_ctrl_video_ready(struct dp_ctrl_private *ctrl)
 	complete(&ctrl->video_comp);
 }
 
-static void dp_ctrl_abort(struct dp_ctrl *dp_ctrl)
+static void dp_ctrl_abort(struct dp_ctrl *dp_ctrl, bool reset)
 {
 	struct dp_ctrl_private *ctrl;
 
@@ -124,7 +125,7 @@ static void dp_ctrl_abort(struct dp_ctrl *dp_ctrl)
 
 	ctrl = container_of(dp_ctrl, struct dp_ctrl_private, dp_ctrl);
 
-	atomic_set(&ctrl->aborted, 1);
+	atomic_set(&ctrl->aborted, !reset);
 }
 
 static void dp_ctrl_state_ctrl(struct dp_ctrl_private *ctrl, u32 state)
@@ -180,9 +181,14 @@ static void dp_ctrl_configure_source_link_params(struct dp_ctrl_private *ctrl,
 	if (enable) {
 		ctrl->catalog->lane_mapping(ctrl->catalog, ctrl->orientation,
 						ctrl->parser->l_map);
+		ctrl->catalog->lane_pnswap(ctrl->catalog,
+						ctrl->parser->l_pnswap);
 		ctrl->catalog->mst_config(ctrl->catalog, ctrl->mst_mode);
 		ctrl->catalog->config_ctrl(ctrl->catalog,
 				ctrl->link->link_params.lane_count);
+		ctrl->catalog->mainlink_levels(ctrl->catalog,
+				ctrl->link->link_params.lane_count);
+		ctrl->catalog->fec_config(ctrl->catalog, false);
 		ctrl->catalog->mainlink_ctrl(ctrl->catalog, true);
 	} else {
 		ctrl->catalog->mainlink_ctrl(ctrl->catalog, false);
@@ -417,7 +423,7 @@ static int dp_ctrl_link_training_2(struct dp_ctrl_private *ctrl)
 	}
 	ctrl->catalog->set_pattern(ctrl->catalog, pattern);
 	ret = dp_ctrl_train_pattern_set(ctrl,
-		pattern | DP_RECOVERED_CLOCK_OUT_EN);
+		pattern | DP_LINK_SCRAMBLING_DISABLE);
 	if (ret <= 0) {
 		ret = -EINVAL;
 		goto end;
@@ -516,6 +522,13 @@ static int dp_ctrl_link_train(struct dp_ctrl_private *ctrl)
 	pr_info("link training #2 successful\n");
 
 end:
+#ifdef CONFIG_SEC_DISPLAYPORT
+	if (!secdp_get_cable_status()) {
+		pr_info("cable is out <2>\n");
+		return -EIO;
+	}
+#endif
+
 	dp_ctrl_state_ctrl(ctrl, 0);
 	/* Make sure to clear the current pattern before starting a new one */
 	wmb();
@@ -531,6 +544,7 @@ end:
 static int dp_ctrl_setup_main_link(struct dp_ctrl_private *ctrl)
 {
 	int ret = 0;
+	const unsigned int fec_cfg_dpcd = 0x120;
 
 	pr_debug("+++\n");
 
@@ -543,6 +557,9 @@ static int dp_ctrl_setup_main_link(struct dp_ctrl_private *ctrl)
 	 * training pattern, we have to first to a DP software reset.
 	 */
 	ctrl->catalog->reset(ctrl->catalog);
+
+	if (ctrl->fec_mode)
+		drm_dp_dpcd_writeb(ctrl->aux->drm_aux, fec_cfg_dpcd, 0x01);
 
 	ret = dp_ctrl_link_train(ctrl);
 #ifdef CONFIG_SEC_DISPLAYPORT
@@ -614,12 +631,10 @@ static int dp_ctrl_link_setup(struct dp_ctrl_private *ctrl, bool shallow)
 	catalog = ctrl->catalog;
 	link_params = &ctrl->link->link_params;
 
-	catalog->hpd_config(catalog, true);
 	catalog->phy_lane_cfg(catalog, ctrl->orientation,
 				link_params->lane_count);
 
-	while (--link_train_max_retries && !atomic_read(&ctrl->aborted)) {
-
+	do {
 #ifdef CONFIG_SEC_DISPLAYPORT
 		if (!secdp_get_cable_status()) {
 			pr_info("cable is out\n");
@@ -627,7 +642,6 @@ static int dp_ctrl_link_setup(struct dp_ctrl_private *ctrl, bool shallow)
 			break;
 		}
 #endif
-
 		pr_debug("bw_code=%d, lane_count=%d\n",
 			link_params->bw_code, link_params->lane_count);
 
@@ -648,8 +662,10 @@ static int dp_ctrl_link_setup(struct dp_ctrl_private *ctrl, bool shallow)
 		 * even though the cable is removed. Disconnect interrupt
 		 * will eventually trigger and shutdown DP.
 		 */
-		if (shallow)
+		if (shallow) {
+			rc = 0;
 			break;
+		}
 
 #if defined(CONFIG_SEC_DISPLAYPORT) && !defined(SECDP_AUDIO_CTS)
 		if (ctrl->link->link_params.bw_code == DP_LINK_BW_1_62 ||
@@ -665,7 +681,7 @@ static int dp_ctrl_link_setup(struct dp_ctrl_private *ctrl, bool shallow)
 
 		/* hw recommended delays before retrying link training */
 		msleep(20);
-	}
+	} while (--link_train_max_retries && !atomic_read(&ctrl->aborted));
 
 	return rc;
 }
@@ -883,7 +899,8 @@ static void dp_ctrl_process_phy_test_request(struct dp_ctrl *dp_ctrl)
 
 	ctrl->aux->init(ctrl->aux, ctrl->parser->aux_cfg);
 
-	ret = ctrl->dp_ctrl.on(&ctrl->dp_ctrl, ctrl->mst_mode, false);
+	ret = ctrl->dp_ctrl.on(&ctrl->dp_ctrl, ctrl->mst_mode,
+					ctrl->fec_mode, false);
 	if (ret)
 		pr_err("failed to enable DP controller\n");
 
@@ -957,6 +974,9 @@ static void dp_ctrl_mst_calculate_rg(struct dp_ctrl_private *ctrl,
 	u32 x_int = 0, y_frac_enum = 0;
 	u64 target_strm_sym, ts_int_fixp, ts_frac_fixp, y_frac_enum_fixp;
 
+	if (panel->pinfo.comp_info.comp_ratio)
+		bpp = panel->pinfo.comp_info.dsc_info.bpp;
+
 	/* min_slot_cnt */
 	numerator = pclk * bpp * 64 * 1000;
 	denominator = lclk * lanes * 8 * 1000;
@@ -971,6 +991,20 @@ static void dp_ctrl_mst_calculate_rg(struct dp_ctrl_private *ctrl,
 	numerator = max_slot_cnt + min_slot_cnt;
 	denominator = drm_fixp_from_fraction(2, 1);
 	raw_target_sc = drm_fixp_div(numerator, denominator);
+
+	pr_debug("raw_target_sc before overhead:0x%llx\n", raw_target_sc);
+	pr_debug("dsc_overhead_fp:0x%llx\n", panel->pinfo.dsc_overhead_fp);
+
+	/* apply fec and dsc overhead factor */
+	if (panel->pinfo.dsc_overhead_fp)
+		raw_target_sc = drm_fixp_mul(raw_target_sc,
+					panel->pinfo.dsc_overhead_fp);
+
+	if (panel->fec_overhead_fp)
+		raw_target_sc = drm_fixp_mul(raw_target_sc,
+					panel->fec_overhead_fp);
+
+	pr_debug("raw_target_sc after overhead:0x%llx\n", raw_target_sc);
 
 	/* target_sc */
 	temp = drm_fixp_from_fraction(256 * lanes, 1);
@@ -1098,6 +1132,30 @@ static void dp_ctrl_mst_stream_setup(struct dp_ctrl_private *ctrl,
 			lanes, bw_code, x_int, y_frac_enum);
 }
 
+static void dp_ctrl_fec_dsc_setup(struct dp_ctrl_private *ctrl)
+{
+	u8 fec_sts = 0;
+	int rlen;
+	u32 dsc_enable;
+	const unsigned int fec_sts_dpcd = 0x280;
+
+	if (ctrl->stream_count || !ctrl->fec_mode)
+		return;
+
+	ctrl->catalog->fec_config(ctrl->catalog, ctrl->fec_mode);
+
+	/* wait for controller to start fec sequence */
+	usleep_range(900, 1000);
+	drm_dp_dpcd_readb(ctrl->aux->drm_aux, fec_sts_dpcd, &fec_sts);
+	pr_debug("sink fec status:%d\n", fec_sts);
+
+	dsc_enable = ctrl->fec_mode ? 1 : 0;
+	rlen = drm_dp_dpcd_writeb(ctrl->aux->drm_aux, DP_DSC_ENABLE,
+			dsc_enable);
+	if (rlen < 1)
+		pr_debug("failed to enable sink dsc\n");
+}
+
 static int dp_ctrl_stream_on(struct dp_ctrl *dp_ctrl, struct dp_panel *panel)
 {
 	int rc = 0;
@@ -1134,6 +1192,8 @@ static int dp_ctrl_stream_on(struct dp_ctrl *dp_ctrl, struct dp_panel *panel)
 	dp_ctrl_mst_send_act(ctrl);
 
 	dp_ctrl_wait4video_ready(ctrl);
+
+	dp_ctrl_fec_dsc_setup(ctrl);
 
 	ctrl->stream_count++;
 
@@ -1213,7 +1273,8 @@ static void dp_ctrl_stream_off(struct dp_ctrl *dp_ctrl, struct dp_panel *panel)
 	ctrl->stream_count--;
 }
 
-static int dp_ctrl_on(struct dp_ctrl *dp_ctrl, bool mst_mode, bool shallow)
+static int dp_ctrl_on(struct dp_ctrl *dp_ctrl, bool mst_mode,
+				bool fec_mode, bool shallow)
 {
 	int rc = 0;
 	struct dp_ctrl_private *ctrl;
@@ -1235,6 +1296,7 @@ static int dp_ctrl_on(struct dp_ctrl *dp_ctrl, bool mst_mode, bool shallow)
 	}
 
 	ctrl->mst_mode = mst_mode;
+	ctrl->fec_mode = fec_mode;
 	rate = ctrl->panel->link_info.rate;
 
 	if (ctrl->link->sink_request & DP_TEST_LINK_PHY_TEST_PATTERN) {
@@ -1256,8 +1318,7 @@ static int dp_ctrl_on(struct dp_ctrl *dp_ctrl, bool mst_mode, bool shallow)
 		ctrl->link->link_params.lane_count);
 
 	rc = dp_ctrl_link_setup(ctrl, shallow);
-	/* Ignore errors in case of shallow processing */
-	if (!shallow && rc)
+	if (rc)
 		goto end;
 
 	ctrl->power_on = true;
@@ -1286,6 +1347,7 @@ static void dp_ctrl_off(struct dp_ctrl *dp_ctrl)
 	dp_ctrl_disable_link_clock(ctrl);
 
 	ctrl->mst_mode = false;
+	ctrl->fec_mode = false;
 	ctrl->power_on = false;
 	memset(&ctrl->mst_ch_info, 0, sizeof(ctrl->mst_ch_info));
 	pr_debug("DP off done\n");
@@ -1363,6 +1425,7 @@ struct dp_ctrl *dp_ctrl_get(struct dp_ctrl_in *in)
 	ctrl->catalog  = in->catalog;
 	ctrl->dev  = in->dev;
 	ctrl->mst_mode = false;
+	ctrl->fec_mode = false;
 
 	dp_ctrl = &ctrl->dp_ctrl;
 

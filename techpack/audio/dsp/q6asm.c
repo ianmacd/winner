@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  * Author: Brian Swetland <swetland@google.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -22,7 +22,6 @@
 #include <linux/miscdevice.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
-
 #include <linux/debugfs.h>
 #include <linux/time.h>
 #include <linux/atomic.h>
@@ -43,6 +42,7 @@
 #include <dsp/q6core.h>
 #include "adsp_err.h"
 
+#define TIMEOUT_MS  1000
 #define TRUE        0x01
 #define FALSE       0x00
 #define SESSION_MAX 8
@@ -830,7 +830,8 @@ int send_asm_custom_topology(struct audio_client *ac)
 	}
 
 	result = wait_event_timeout(ac->mem_wait,
-			(atomic_read(&ac->mem_state) >= 0), 5*HZ);
+			(atomic_read(&ac->mem_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!result) {
 		pr_err("%s: Set topologies failed timeout\n", __func__);
 		pr_debug("%s: Set topologies failed after timedout payload = 0x%pK\n",
@@ -1268,7 +1269,8 @@ int q6asm_send_stream_cmd(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state_pp) >= 0), 1 * HZ);
+				(atomic_read(&ac->cmd_state_pp) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout for stream event cmd resp\n", __func__);
 		rc = -ETIMEDOUT;
@@ -1956,12 +1958,10 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 		data->dest_port);
 	if ((data->opcode != ASM_DATA_EVENT_RENDERED_EOS) &&
 	    (data->opcode != ASM_DATA_EVENT_EOS) &&
-		(data->opcode != ASM_SESSION_EVENTX_OVERFLOW) &&
+	    (data->opcode != ASM_SESSION_EVENTX_OVERFLOW) &&
 	    (data->opcode != ASM_SESSION_EVENT_RX_UNDERFLOW)) {
-		if (payload == NULL ||
-				(data->payload_size < (2 * sizeof(uint32_t)))) {
-			pr_err("%s: payload is null or invalid size[%d]\n",
-				__func__, data->payload_size);
+		if (payload == NULL) {
+			pr_err("%s: payload is null\n", __func__);
 			spin_unlock_irqrestore(
 				&(session[session_id].session_lock), flags);
 			return -EINVAL;
@@ -2176,9 +2176,9 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 			buf_index = asm_token._token.buf_index;
 			if (buf_index < 0 || buf_index >= port->max_buf_cnt) {
 				pr_debug("%s: Invalid buffer index %u\n",
-					__func__, buf_index);
+				__func__, buf_index);
 				spin_unlock_irqrestore(&port->dsp_lock,
-					dsp_flags);
+								dsp_flags);
 				spin_unlock_irqrestore(
 					&(session[session_id].session_lock),
 					flags);
@@ -2288,9 +2288,9 @@ static int32_t q6asm_callback(struct apr_client_data *data, void *priv)
 			buf_index = asm_token._token.buf_index;
 			if (buf_index < 0 || buf_index >= port->max_buf_cnt) {
 				pr_debug("%s: Invalid buffer index %u\n",
-					__func__, buf_index);
+				__func__, buf_index);
 				spin_unlock_irqrestore(&port->dsp_lock,
-					dsp_flags);
+								dsp_flags);
 				spin_unlock_irqrestore(
 					&(session[session_id].session_lock),
 					flags);
@@ -2493,7 +2493,7 @@ void *q6asm_is_cpu_buf_avail(int dir, struct audio_client *ac, uint32_t *size,
 			/* To make it more robust, we could loop and get the
 			 * next avail buf, its risky though
 			 */
-			pr_err("%s: Next buf idx[0x%x] not available, dir[%d]\n",
+			pr_err_ratelimited("%s: Next buf idx[0x%x] not available, dir[%d]\n",
 			 __func__, idx, dir);
 			mutex_unlock(&port->lock);
 			return NULL;
@@ -2604,7 +2604,7 @@ void *q6asm_is_cpu_buf_avail_nolock(int dir, struct audio_client *ac,
 		 * To make it more robust, we could loop and get the
 		 * next avail buf, its risky though
 		 */
-		pr_err("%s: Next buf idx[0x%x] not available, dir[%d]\n",
+		pr_err_ratelimited("%s: Next buf idx[0x%x] not available, dir[%d]\n",
 		 __func__, idx, dir);
 		return NULL;
 	}
@@ -2647,7 +2647,7 @@ int q6asm_is_dsp_buf_avail(int dir, struct audio_client *ac)
 			/* To make it more robust, we could loop and get the
 			 * next avail buf, its risky though
 			 */
-			pr_err("%s: Next buf idx[0x%x] not available, dir[%d]\n",
+			pr_err_ratelimited("%s: Next buf idx[0x%x] not available, dir[%d]\n",
 				__func__, idx, dir);
 			mutex_unlock(&port->lock);
 			return ret;
@@ -2899,7 +2899,8 @@ int q6asm_set_pp_params(struct audio_client *ac,
 	}
 
 	ret = wait_event_timeout(ac->cmd_wait,
-				 atomic_read(&ac->cmd_state_pp) >= 0, 5 * HZ);
+				 atomic_read(&ac->cmd_state_pp) >= 0,
+				 msecs_to_jiffies(TIMEOUT_MS));
 	if (!ret) {
 		pr_err("%s: timeout sending apr pkt\n", __func__);
 		ret = -ETIMEDOUT;
@@ -3049,7 +3050,8 @@ int q6asm_open_read_compressed(struct audio_client *ac, uint32_t format,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 1*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for OPEN_READ_COMPR rc[%d]\n",
 			__func__, rc);
@@ -3172,7 +3174,8 @@ static int __q6asm_open_read(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for open read\n",
 				__func__);
@@ -3365,7 +3368,8 @@ int q6asm_open_write_compressed(struct audio_client *ac, uint32_t format,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-		(atomic_read(&ac->cmd_state) >= 0), 1*HZ);
+		(atomic_read(&ac->cmd_state) >= 0),
+		msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for OPEN_WRITE_COMPR rc[%d]\n",
 			__func__, rc);
@@ -3524,7 +3528,8 @@ static int __q6asm_open_write(struct audio_client *ac, uint32_t format,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for open write\n", __func__);
 		rc = -ETIMEDOUT;
@@ -3827,7 +3832,8 @@ static int __q6asm_open_read_write(struct audio_client *ac, uint32_t rd_format,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for open read-write\n",
 				__func__);
@@ -3981,7 +3987,8 @@ int q6asm_open_loopback_v2(struct audio_client *ac, uint16_t bits_per_sample)
 		}
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for open_loopback\n",
 				__func__);
@@ -4091,7 +4098,8 @@ int q6asm_open_transcode_loopback(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for open_transcode_loopback\n",
 			__func__);
@@ -4249,15 +4257,15 @@ int q6asm_open_shared_io(struct audio_client *ac,
 	if (!ac || !config)
 		return -EINVAL;
 
-	if (config->channels > PCM_FORMAT_MAX_NUM_CHANNEL) {
-		pr_err("%s: Invalid channel count %d\n", __func__,
-			config->channels);
-		return -EINVAL;
-	}
-	
 	if (!use_default_chmap && (channel_map == NULL)) {
 		pr_err("%s: No valid chan map and can't use default\n",
 			__func__);
+		return -EINVAL;
+	}
+
+	if (config->channels > PCM_FORMAT_MAX_NUM_CHANNEL) {
+		pr_err("%s: Invalid channel count %d\n", __func__,
+			config->channels);
 		return -EINVAL;
 	}
 
@@ -4388,7 +4396,8 @@ int q6asm_open_shared_io(struct audio_client *ac,
 
 	pr_debug("%s: sent open apr pkt\n", __func__);
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) <= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) <= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: Timeout. Waited for open write apr pkt rc[%d]\n",
 		       __func__, rc);
@@ -4558,7 +4567,8 @@ int q6asm_run(struct audio_client *ac, uint32_t flags,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for run success",
 				__func__);
@@ -4658,6 +4668,11 @@ int q6asm_enc_cfg_blk_custom(struct audio_client *ac,
 
 	custom_size = enc_generic->reserved[1];
 
+	if (channels > PCM_FORMAT_MAX_NUM_CHANNEL) {
+		pr_err("%s: Invalid channel count %d\n", __func__, channels);
+		return -EINVAL;
+	}
+
 	pr_debug("%s: session[%d] size[%d] res[2]=[%d] res[3]=[%d]\n",
 		 __func__, ac->session, custom_size, enc_generic->reserved[2],
 		 enc_generic->reserved[3]);
@@ -4703,7 +4718,8 @@ int q6asm_enc_cfg_blk_custom(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n",
 			__func__);
@@ -4774,7 +4790,8 @@ int q6asm_enc_cfg_blk_aac(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n",
 			__func__);
@@ -4836,7 +4853,8 @@ int q6asm_enc_cfg_blk_g711(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n",
 			__func__);
@@ -4905,7 +4923,8 @@ int q6asm_set_encdec_chan_map(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				 (atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n", __func__,
 			   chan_map.hdr.opcode);
@@ -4956,6 +4975,12 @@ static int q6asm_enc_cfg_blk_pcm_v5(struct audio_client *ac,
 	if (!use_default_chmap && (channel_map == NULL)) {
 		pr_err("%s: No valid chan map and can't use default\n",
 				__func__);
+		rc = -EINVAL;
+		goto fail_cmd;
+	}
+
+	if (channels > PCM_FORMAT_MAX_NUM_CHANNEL_V8) {
+		pr_err("%s: Invalid channel count %d\n", __func__, channels);
 		rc = -EINVAL;
 		goto fail_cmd;
 	}
@@ -5115,7 +5140,8 @@ int q6asm_enc_cfg_blk_pcm_v4(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n",
 		       __func__, enc_cfg.hdr.opcode);
@@ -5218,7 +5244,8 @@ int q6asm_enc_cfg_blk_pcm_v3(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n",
 		       __func__, enc_cfg.hdr.opcode);
@@ -5317,7 +5344,8 @@ int q6asm_enc_cfg_blk_pcm_v2(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n",
 			__func__, enc_cfg.hdr.opcode);
@@ -5488,7 +5516,6 @@ int q6asm_enc_cfg_blk_pcm_native(struct audio_client *ac,
 	struct asm_multi_channel_pcm_enc_cfg_v2  enc_cfg;
 	u8 *channel_mapping;
 	u32 frames_per_buf = 0;
-
 	int rc = 0;
 
 	if (channels > PCM_FORMAT_MAX_NUM_CHANNEL) {
@@ -5530,7 +5557,8 @@ int q6asm_enc_cfg_blk_pcm_native(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n",
 			__func__, enc_cfg.hdr.opcode);
@@ -5702,7 +5730,8 @@ int q6asm_enable_sbrps(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x] ", __func__, sbrps.hdr.opcode);
 		rc = -ETIMEDOUT;
@@ -5761,7 +5790,8 @@ int q6asm_cfg_dual_mono_aac(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n", __func__,
 						dual_mono.hdr.opcode);
@@ -5807,7 +5837,8 @@ int q6asm_cfg_aac_sel_mix_coef(struct audio_client *ac, uint32_t mix_coeff)
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-		(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+		(atomic_read(&ac->cmd_state) >= 0),
+		msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n",
 			__func__, aac_mix_coeff.hdr.opcode);
@@ -5876,7 +5907,8 @@ int q6asm_enc_cfg_blk_qcelp(struct audio_client *ac, uint32_t frames_per_buf,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for setencdec v13k resp\n",
 			__func__);
@@ -5943,7 +5975,8 @@ int q6asm_enc_cfg_blk_evrc(struct audio_client *ac, uint32_t frames_per_buf,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for encdec evrc\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6004,7 +6037,8 @@ int q6asm_enc_cfg_blk_amrnb(struct audio_client *ac, uint32_t frames_per_buf,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for set encdec amrnb\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6065,7 +6099,8 @@ int q6asm_enc_cfg_blk_amrwb(struct audio_client *ac, uint32_t frames_per_buf,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6151,7 +6186,8 @@ static int __q6asm_media_format_block_pcm(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6237,7 +6273,8 @@ static int __q6asm_media_format_block_pcm_v3(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6327,7 +6364,8 @@ static int __q6asm_media_format_block_pcm_v4(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6360,6 +6398,11 @@ static int __q6asm_media_format_block_pcm_v5(struct audio_client *ac,
 	struct asm_multi_channel_pcm_fmt_blk_param_v5 fmt;
 	u8 *channel_mapping;
 	int rc;
+
+	if (channels > PCM_FORMAT_MAX_NUM_CHANNEL_V8) {
+		pr_err("%s: Invalid channel count %d\n", __func__, channels);
+		return -EINVAL;
+	}
 
 	pr_debug("%s: session[%d]rate[%d]ch[%d]bps[%d]wordsize[%d]\n", __func__,
 		 ac->session, rate, channels,
@@ -6654,7 +6697,8 @@ static int __q6asm_media_format_block_multi_ch_pcm(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6728,7 +6772,8 @@ static int __q6asm_media_format_block_multi_ch_pcm_v3(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6806,7 +6851,8 @@ static int __q6asm_media_format_block_multi_ch_pcm_v4(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -6838,6 +6884,11 @@ static int __q6asm_media_format_block_multi_ch_pcm_v5(struct audio_client *ac,
 	struct asm_multi_channel_pcm_fmt_blk_param_v5 fmt;
 	u8 *channel_mapping;
 	int rc;
+
+	if (channels > PCM_FORMAT_MAX_NUM_CHANNEL_V8) {
+		pr_err("%s: Invalid channel count %d\n", __func__, channels);
+		return -EINVAL;
+	}
 
 	pr_debug("%s: session[%d]rate[%d]ch[%d]bps[%d]wordsize[%d]\n", __func__,
 		 ac->session, rate, channels,
@@ -7073,7 +7124,8 @@ int q6asm_media_format_block_gen_compr(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7129,7 +7181,8 @@ int q6asm_media_format_block_iec(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for format update\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7198,7 +7251,8 @@ static int __q6asm_media_format_block_multi_aac(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7312,7 +7366,8 @@ int q6asm_media_format_block_wma(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7383,7 +7438,8 @@ int q6asm_media_format_block_wmapro(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7442,7 +7498,8 @@ int q6asm_media_format_block_amrwbplus(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7505,7 +7562,8 @@ int q6asm_stream_media_format_block_flac(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s :timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7572,7 +7630,8 @@ int q6asm_media_format_block_alac(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s :timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7641,7 +7700,8 @@ int q6asm_media_format_block_g711(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s :timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7697,7 +7757,8 @@ int q6asm_stream_media_format_block_vorbis(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s :timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7762,7 +7823,8 @@ int q6asm_media_format_block_ape(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s :timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7822,7 +7884,8 @@ int q6asm_media_format_block_dsd(struct audio_client *ac,
 		goto done;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for DSD FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7884,7 +7947,8 @@ int q6asm_stream_media_format_block_aptx_dec(struct audio_client *ac,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s :timeout. waited for FORMAT_UPDATE\n", __func__);
 		rc = -ETIMEDOUT;
@@ -7942,7 +8006,8 @@ static int __q6asm_ds1_set_endp_params(struct audio_client *ac, int param_id,
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-		(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+		(atomic_read(&ac->cmd_state) >= 0),
+		msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout opcode[0x%x]\n", __func__,
 			ddp_cfg.hdr.opcode);
@@ -8078,7 +8143,8 @@ int q6asm_memory_map(struct audio_client *ac, phys_addr_t buf_add, int dir,
 
 	rc = wait_event_timeout(ac->mem_wait,
 			(atomic_read(&ac->mem_state) >= 0 &&
-			 ac->port[dir].tmp_hdl), 5*HZ);
+			 ac->port[dir].tmp_hdl),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for memory_map\n", __func__);
 		rc = -ETIMEDOUT;
@@ -8166,7 +8232,8 @@ int q6asm_memory_unmap(struct audio_client *ac, phys_addr_t buf_add, int dir)
 	}
 
 	rc = wait_event_timeout(ac->mem_wait,
-			(atomic_read(&ac->mem_state) >= 0), 5 * HZ);
+			(atomic_read(&ac->mem_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for memory_unmap of handle 0x%x\n",
 			__func__, mem_unmap.mem_map_handle);
@@ -8318,7 +8385,8 @@ static int q6asm_memory_map_regions(struct audio_client *ac, int dir,
 
 	rc = wait_event_timeout(ac->mem_wait,
 			(atomic_read(&ac->mem_state) >= 0 &&
-			 ac->port[dir].tmp_hdl), 5*HZ);
+			 ac->port[dir].tmp_hdl),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for memory_map\n", __func__);
 		rc = -ETIMEDOUT;
@@ -8417,7 +8485,8 @@ static int q6asm_memory_unmap_regions(struct audio_client *ac, int dir)
 	}
 
 	rc = wait_event_timeout(ac->mem_wait,
-			(atomic_read(&ac->mem_state) >= 0), 5*HZ);
+			(atomic_read(&ac->mem_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for memory_unmap of handle 0x%x\n",
 			__func__, mem_unmap.mem_map_handle);
@@ -8681,7 +8750,8 @@ int q6asm_set_aptx_dec_bt_addr(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout, set-params paramid[0x%x]\n", __func__,
 			paylod.encdec.param_id);
@@ -8776,7 +8846,8 @@ int q6asm_send_ion_fd(struct audio_client *ac, int fd)
 	}
 
 	ret = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 1*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!ret) {
 		pr_err("%s: timeout, shm.encdec paramid[0x%x]\n", __func__,
 		       shm.encdec.param_id);
@@ -8848,7 +8919,8 @@ int q6asm_send_rtic_event_ack(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 1 * HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout for rtic event ack cmd\n", __func__);
 		rc = -ETIMEDOUT;
@@ -9099,7 +9171,7 @@ static int __q6asm_read(struct audio_client *ac, bool is_custom_len_reqd,
 			buf_node = list_entry(ptr, struct asm_buffer_node,
 					list);
 			if (buf_node->buf_phys_addr == ab->phys) {
- 				read.mem_map_handle = buf_node->mmap_hdl;
+				read.mem_map_handle = buf_node->mmap_hdl;
 				break;
 			}
 		}
@@ -9407,8 +9479,8 @@ int q6asm_async_read(struct audio_client *ac,
 	}
 
 	rc = apr_send_pkt(ac->apr, (uint32_t *) &read);
-	if (rc < 0) {
-		pr_err("%s: read op[0x%x]rc[%d]\n", __func__,
+	if (rc < 0 && rc != -ENETRESET) {
+		pr_err_ratelimited("%s: read op[0x%x]rc[%d]\n", __func__,
 				read.hdr.opcode, rc);
 		goto fail_cmd;
 	}
@@ -9649,15 +9721,17 @@ int q6asm_get_session_time(struct audio_client *ac, uint64_t *tstamp)
 		 ac->session, mtmx_params.hdr.opcode);
 	rc = apr_send_pkt(ac->apr, (uint32_t *) &mtmx_params);
 	if (rc < 0) {
-		pr_err("%s: Commmand 0x%x failed %d\n", __func__,
-		       mtmx_params.hdr.opcode, rc);
-		goto fail_cmd;
+		dev_err_ratelimited(ac->dev, "%s: Get Session Time failed %d\n",
+				    __func__, rc);
+		return rc;
 	}
+
 	rc = wait_event_timeout(ac->time_wait,
-			(atomic_read(&ac->time_flag) == 0), 5*HZ);
+			(atomic_read(&ac->time_flag) == 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout in getting session time from DSP\n",
-				__func__);
+		       __func__);
 		goto fail_cmd;
 	}
 
@@ -9710,7 +9784,8 @@ int q6asm_get_session_time_legacy(struct audio_client *ac, uint64_t *tstamp)
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->time_wait,
-			(atomic_read(&ac->time_flag) == 0), 5*HZ);
+			(atomic_read(&ac->time_flag) == 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout in getting session time from DSP\n",
 				__func__);
@@ -9788,7 +9863,8 @@ int q6asm_send_mtmx_strtr_window(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout, Render window start paramid[0x%x]\n",
 			__func__, matrix.data.param_id);
@@ -9883,7 +9959,8 @@ int q6asm_send_mtmx_strtr_render_mode(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout, Render mode send paramid [0x%x]\n",
 			__func__, matrix.data.param_id);
@@ -9978,7 +10055,8 @@ int q6asm_send_mtmx_strtr_clk_rec_mode(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout, clk rec mode send paramid [0x%x]\n",
 			__func__, matrix.data.param_id);
@@ -10061,7 +10139,8 @@ int q6asm_send_mtmx_strtr_enable_adjust_session_clock(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: enable adjust session failed failed paramid [0x%x]\n",
 			__func__, matrix.data.param_id);
@@ -10162,7 +10241,8 @@ static int __q6asm_cmd(struct audio_client *ac, int cmd, uint32_t stream_id)
 		rc = -EINVAL;
 		goto fail_cmd;
 	}
-	rc = wait_event_timeout(ac->cmd_wait, (atomic_read(state) >= 0), 5*HZ);
+	rc = wait_event_timeout(ac->cmd_wait, (atomic_read(state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for response opcode[0x%x]\n",
 				__func__, hdr.opcode);
@@ -10488,7 +10568,8 @@ int q6asm_reg_tx_overflow(struct audio_client *ac, uint16_t enable)
 		goto fail_cmd;
 	}
 	rc = wait_event_timeout(ac->cmd_wait,
-				(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+				(atomic_read(&ac->cmd_state) >= 0),
+				msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for tx overflow\n", __func__);
 		rc = -ETIMEDOUT;
@@ -10593,7 +10674,8 @@ int q6asm_adjust_session_clock(struct audio_client *ac,
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5*HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout, adjust_clock paramid[0x%x]\n",
 			__func__, adjust_clock.hdr.opcode);
@@ -10645,7 +10727,8 @@ int q6asm_get_path_delay(struct audio_client *ac)
 	}
 
 	rc = wait_event_timeout(ac->cmd_wait,
-			(atomic_read(&ac->cmd_state) >= 0), 5 * HZ);
+			(atomic_read(&ac->cmd_state) >= 0),
+			msecs_to_jiffies(TIMEOUT_MS));
 	if (!rc) {
 		pr_err("%s: timeout. waited for response opcode[0x%x]\n",
 				__func__, hdr.opcode);

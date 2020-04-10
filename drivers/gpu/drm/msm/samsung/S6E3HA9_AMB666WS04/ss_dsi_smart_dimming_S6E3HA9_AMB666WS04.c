@@ -605,10 +605,10 @@ static int get_base_luminance(struct SMART_DIM *pSmart)
 
 	switch (pSmart->panel_revision) {
 	case 'A':
-		memcpy(base_luminance, base_luminance_star_revA, sizeof(base_luminance_star_revA));
+		memcpy(base_luminance, base_luminance_bx_revA, sizeof(base_luminance_bx_revA));
 		break;
 	default:
-		memcpy(base_luminance, base_luminance_star_revA, sizeof(base_luminance_star_revA));
+		memcpy(base_luminance, base_luminance_bx_revA, sizeof(base_luminance_bx_revA));
 		break;
 	}
 
@@ -637,10 +637,10 @@ static int get_gradation_offset(int table_index, int index, int panel_revision)
 
 	switch (panel_revision) {
 	case 'A':
-		ret = gradation_offset_star_revA[table_index][index];
+		ret = gradation_offset_bx_revA[table_index][index];
 		break;
 	default:
-		ret = gradation_offset_star_revA[table_index][index];
+		ret = gradation_offset_bx_revA[table_index][index];
 		break;
 	}
 
@@ -653,10 +653,10 @@ static int get_rgb_offset(int table_index, int index, int panel_revision)
 
 	switch (panel_revision) {
 	case 'A':
-		ret = rgb_offset_star_revA[table_index][index];
+		ret = rgb_offset_bx_revA[table_index][index];
 		break;
 	default:
-		ret = rgb_offset_star_revA[table_index][index];
+		ret = rgb_offset_bx_revA[table_index][index];
 		break;
 	}
 

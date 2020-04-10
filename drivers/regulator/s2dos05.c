@@ -646,6 +646,9 @@ static int fb_state_change(struct notifier_block *nb, unsigned long val,
 	blank = data;
 
 	if (*blank == FB_BLANK_UNBLANK) {
+#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT)
+		s2mpb02_recovery(1);
+#endif
 		schedule_delayed_work(&fd_work, msecs_to_jiffies(500));
  	} else {
 		cancel_delayed_work_sync(&fd_work);

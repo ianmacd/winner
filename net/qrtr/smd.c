@@ -1,6 +1,5 @@
-/*
- * Copyright (c) 2015, Sony Mobile Communications Inc.
- * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015, Sony Mobile Communications Inc.
+ * Copyright (c) 2013, 2018-2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/rpmsg.h>
+#include <linux/of.h>
 
 #include "qrtr.h"
 
@@ -49,27 +49,12 @@ static int qcom_smd_qrtr_send(struct qrtr_endpoint *ep, struct sk_buff *skb)
 {
 	struct qrtr_smd_dev *qdev = container_of(ep, struct qrtr_smd_dev, ep);
 	int rc;
-	u64 in_time_ns, out_time_ns;
-	u64 in_nano_rem, out_nano_rem;
 
 	rc = skb_linearize(skb);
 	if (rc)
 		goto out;
 
 	rc = rpmsg_send(qdev->channel, skb->data, skb->len);
-
-	out_time_ns = sched_clock();
-	in_time_ns = QRTR_DBG_TX_CB(skb)->ns;
-
-	if (out_time_ns - in_time_ns > QRTR_TIME_LIMIT_NS) {
-		in_nano_rem = do_div(in_time_ns, 1000000000U);
-		out_nano_rem = do_div(out_time_ns, 1000000000U);
-		pr_err("qrtr tx delayed: i[%6u.%09lu] o[%6u.%09lu]: %s[%d]\n",
-		       in_time_ns, in_nano_rem, out_time_ns, out_nano_rem,
-		       QRTR_DBG_TX_CB(skb)->task, QRTR_DBG_TX_CB(skb)->pid);
-		print_hex_dump(KERN_ERR, "[tx] qmi raw: ", DUMP_PREFIX_OFFSET,
- 		    16, 1, skb->data, skb->len < 64 ? skb->len : 64, false);
-	}
 
 out:
 	if (rc)
@@ -82,6 +67,8 @@ out:
 static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 {
 	struct qrtr_smd_dev *qdev;
+	u32 net_id;
+	bool rt;
 	int rc;
 
 	qdev = devm_kzalloc(&rpdev->dev, sizeof(*qdev), GFP_KERNEL);
@@ -92,7 +79,13 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 	qdev->dev = &rpdev->dev;
 	qdev->ep.xmit = qcom_smd_qrtr_send;
 
-	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
+	rc = of_property_read_u32(rpdev->dev.of_node, "qcom,net-id", &net_id);
+	if (rc < 0)
+		net_id = QRTR_EP_NET_ID_AUTO;
+
+	rt = of_property_read_bool(rpdev->dev.of_node, "qcom,low-latency");
+
+	rc = qrtr_endpoint_register(&qdev->ep, net_id, rt);
 	if (rc)
 		return rc;
 

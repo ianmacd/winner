@@ -41,6 +41,7 @@
 #include <drm/drm_vma_manager.h>
 #include <drm/drm_gem.h>
 #include "drm_internal.h"
+#include "msm/sde/sde_trace.h"
 
 /** @file drm_gem.c
  *
@@ -665,11 +666,13 @@ drm_gem_close_ioctl(struct drm_device *dev, void *data,
 	struct drm_gem_close *args = data;
 	int ret;
 
+	SDE_ATRACE_BEGIN("drm_gem_close_ioctl");
 	if (!drm_core_check_feature(dev, DRIVER_GEM))
 		return -ENODEV;
 
 	ret = drm_gem_handle_delete(file_priv, args->handle);
 
+	SDE_ATRACE_END("drm_gem_close_ioctl");
 	return ret;
 }
 

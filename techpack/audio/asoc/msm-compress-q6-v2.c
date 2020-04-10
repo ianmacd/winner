@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -46,6 +46,7 @@
 #include "msm-pcm-routing-v2.h"
 #include "msm-qti-pp-config.h"
 
+#define TIMEOUT_MS			1000
 #define DSP_PP_BUFFERING_IN_MSEC	25
 #define PARTIAL_DRAIN_ACK_EARLY_BY_MSEC	150
 #define MP3_OUTPUT_FRAME_SZ		1152
@@ -1601,12 +1602,19 @@ static int msm_compr_playback_open(struct snd_compr_stream *cstream)
 	struct msm_compr_audio *prtd = NULL;
 	struct msm_compr_pdata *pdata =
 			snd_soc_platform_get_drvdata(rtd->platform);
+	enum apr_subsys_state q6_state;
 
 	pr_debug("%s\n", __func__);
 	if (pdata->is_in_use[rtd->dai_link->id] == true) {
 		pr_err("%s: %s is already in use, err: %d\n",
 			__func__, rtd->dai_link->cpu_dai_name, -EBUSY);
 		return -EBUSY;
+	}
+
+	q6_state = apr_get_q6_state();
+	if (q6_state == APR_SUBSYS_DOWN) {
+		pr_debug("%s: adsp is down\n", __func__);
+		return -ENETRESET;
 	}
 	prtd = kzalloc(sizeof(struct msm_compr_audio), GFP_KERNEL);
 	if (prtd == NULL) {
@@ -1702,8 +1710,15 @@ static int msm_compr_capture_open(struct snd_compr_stream *cstream)
 	struct msm_compr_audio *prtd;
 	struct msm_compr_pdata *pdata =
 			snd_soc_platform_get_drvdata(rtd->platform);
+	enum apr_subsys_state q6_state;
 
 	pr_debug("%s\n", __func__);
+
+	q6_state = apr_get_q6_state();
+	if (q6_state == APR_SUBSYS_DOWN) {
+		pr_debug("%s: adsp is down\n", __func__);
+		return -ENETRESET;
+	}
 	prtd = kzalloc(sizeof(struct msm_compr_audio), GFP_KERNEL);
 	if (prtd == NULL) {
 		pr_err("Failed to allocate memory for msm_compr_audio\n");
@@ -1744,6 +1759,11 @@ static int msm_compr_capture_open(struct snd_compr_stream *cstream)
 	atomic_set(&prtd->close, 0);
 	atomic_set(&prtd->wait_on_close, 0);
 	atomic_set(&prtd->error, 0);
+
+	init_waitqueue_head(&prtd->eos_wait);
+	init_waitqueue_head(&prtd->drain_wait);
+	init_waitqueue_head(&prtd->close_wait);
+	init_waitqueue_head(&prtd->wait_for_stream_avail);
 
 	runtime->private_data = prtd;
 
@@ -1800,7 +1820,8 @@ static int msm_compr_playback_free(struct snd_compr_stream *cstream)
 	}
 	if (atomic_read(&prtd->eos)) {
 		ret = wait_event_timeout(prtd->eos_wait,
-					 prtd->eos_ack, 5 * HZ);
+					prtd->eos_ack,
+					msecs_to_jiffies(TIMEOUT_MS));
 		if (!ret)
 			pr_err("%s: CMD_EOS failed\n", __func__);
 	}
@@ -1808,7 +1829,8 @@ static int msm_compr_playback_free(struct snd_compr_stream *cstream)
 		prtd->cmd_ack = 0;
 		atomic_set(&prtd->wait_on_close, 1);
 		ret = wait_event_timeout(prtd->close_wait,
-					prtd->cmd_ack, 5 * HZ);
+					prtd->cmd_ack,
+					msecs_to_jiffies(TIMEOUT_MS));
 		if (!ret)
 			pr_err("%s: CMD_CLOSE failed\n", __func__);
 	}
@@ -2730,12 +2752,10 @@ static int msm_compr_pointer(struct snd_compr_stream *cstream,
 				rc = q6asm_get_session_time(
 				prtd->audio_client, &prtd->marker_timestamp);
 			if (rc < 0) {
-				pr_err("%s: Get Session Time return =%lld\n",
-					__func__, timestamp);
 				if (atomic_read(&prtd->error))
 					return -ENETRESET;
 				else
-					return -EAGAIN;
+					return rc;
 			}
 		}
 	} else {

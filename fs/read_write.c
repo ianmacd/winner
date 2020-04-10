@@ -25,6 +25,10 @@
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
 
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
+
 #ifdef CONFIG_FSCRYPT_SDP
 #include <linux/fscrypto_sdp_cache.h>
 #endif
@@ -561,6 +565,10 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 
 	ret = rw_verify_area(WRITE, file, pos, count);
 	if (!ret) {
+#ifdef CONFIG_SECURITY_DEFEX
+		if (task_defex_enforce(current, file, -__NR_write))
+			return -EPERM;
+#endif
 		if (count > MAX_RW_COUNT)
 			count =  MAX_RW_COUNT;
 		file_start_write(file);
@@ -1260,6 +1268,9 @@ COMPAT_SYSCALL_DEFINE5(preadv64v2, unsigned long, fd,
 		const struct compat_iovec __user *,vec,
 		unsigned long, vlen, loff_t, pos, rwf_t, flags)
 {
+	if (pos == -1)
+		return do_compat_readv(fd, vec, vlen, flags);
+
 	return do_compat_preadv64(fd, vec, vlen, pos, flags);
 }
 #endif
@@ -1366,6 +1377,9 @@ COMPAT_SYSCALL_DEFINE5(pwritev64v2, unsigned long, fd,
 		const struct compat_iovec __user *,vec,
 		unsigned long, vlen, loff_t, pos, rwf_t, flags)
 {
+	if (pos == -1)
+		return do_compat_writev(fd, vec, vlen, flags);
+
 	return do_compat_pwritev64(fd, vec, vlen, pos, flags);
 }
 #endif
@@ -1837,8 +1851,8 @@ int vfs_clone_file_prep_inodes(struct inode *inode_in, loff_t pos_in,
 }
 EXPORT_SYMBOL(vfs_clone_file_prep_inodes);
 
-int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
-		struct file *file_out, loff_t pos_out, u64 len)
+int do_clone_file_range(struct file *file_in, loff_t pos_in,
+			struct file *file_out, loff_t pos_out, u64 len)
 {
 	struct inode *inode_in = file_inode(file_in);
 	struct inode *inode_out = file_inode(file_out);
@@ -1882,6 +1896,19 @@ int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
 		fsnotify_access(file_in);
 		fsnotify_modify(file_out);
 	}
+
+	return ret;
+}
+EXPORT_SYMBOL(do_clone_file_range);
+
+int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
+			 struct file *file_out, loff_t pos_out, u64 len)
+{
+	int ret;
+
+	file_start_write(file_out);
+	ret = do_clone_file_range(file_in, pos_in, file_out, pos_out, len);
+	file_end_write(file_out);
 
 	return ret;
 }

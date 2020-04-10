@@ -161,7 +161,6 @@ typedef struct _manager_data_t
 	int vbus_by_otg_detection;
 	int pd_con_state;
 	int water_det;
-	int water_cable_det;
 	int wVbus_det;
 	int is_MPSM;
 	void *pd;

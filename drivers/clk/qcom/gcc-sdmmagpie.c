@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -43,8 +43,8 @@ static DEFINE_VDD_REGULATORS(vdd_cx, VDD_NUM, 1, vdd_corner);
 static DEFINE_VDD_REGULATORS(vdd_cx_ao, VDD_NUM, 1, vdd_corner);
 
 enum {
-	P_AUD_REF_CLK,
 	P_BI_TCXO,
+	P_AUD_REF_CLK,
 	P_CORE_BI_PLL_TEST_SE,
 	P_GPLL0_OUT_EVEN,
 	P_GPLL0_OUT_MAIN,
@@ -1820,6 +1820,7 @@ static struct clk_branch gcc_pcie_0_mstr_axi_clk = {
 };
 
 static struct clk_branch gcc_pcie_0_pipe_clk = {
+	.halt_reg = 0x6b020,
 	.halt_check = BRANCH_HALT_SKIP,
 	.clkr = {
 		.enable_reg = 0x5200c,
@@ -3230,6 +3231,7 @@ static const struct qcom_reset_map gcc_sdmmagpie_resets[] = {
 	[GCC_USB3_PHY_PRIM_BCR] = { 0x50000 },
 	[GCC_USB3_PHY_SEC_BCR] = { 0x5000c },
 	[GCC_QUSB2PHY_PRIM_BCR] = { 0x26000 },
+	[GCC_VIDEO_AXI_CLK_BCR] = { 0xb01c, 2 },
 };
 
 static struct clk_dfs gcc_dfs_clocks[] = {

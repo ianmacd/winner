@@ -40,9 +40,9 @@ ifeq ($(KERNEL_BUILD), 0)
 		INCS    +=  -include $(AUDIO_ROOT)/config/sm6150autoconf.h
 	endif
 	ifeq ($(CONFIG_ARCH_TRINKET), y)
-		include $(AUDIO_ROOT)/config/sm6150auto.conf
+		include $(AUDIO_ROOT)/config/trinketauto.conf
 		export
-		INCS    +=  -include $(AUDIO_ROOT)/config/sm6150autoconf.h
+		INCS    +=  -include $(AUDIO_ROOT)/config/trinketautoconf.h
 	endif
 	ifeq ($(CONFIG_ARCH_SDMSHRIKE), y)
 		include $(AUDIO_ROOT)/config/sm8150auto.conf
@@ -98,6 +98,7 @@ ifdef CONFIG_WCD9XXX_CODEC_CORE
 endif
 
 ifdef CONFIG_SND_SOC_WCD9XXX_V2
+	WCD9XXX_OBJS += wcd-clsh.o
 	WCD9XXX_OBJS += wcd9xxx-common-v2.o
 	WCD9XXX_OBJS += wcd9xxx-resmgr-v2.o
 	WCD9XXX_OBJS += wcdcal-hwdep.o
@@ -116,6 +117,13 @@ ifdef CONFIG_SND_SOC_WSA881X
 	WSA881X_OBJS += wsa881x-tables.o
 	WSA881X_OBJS += wsa881x-regmap.o
 	WSA881X_OBJS += wsa881x-temp-sensor.o
+endif
+
+ifdef CONFIG_SND_SOC_WSA881X_ANALOG
+	WSA881X_ANALOG_OBJS += wsa881x-analog.o
+	WSA881X_ANALOG_OBJS += wsa881x-tables-analog.o
+	WSA881X_ANALOG_OBJS += wsa881x-regmap-analog.o
+	WSA881X_ANALOG_OBJS += wsa881x-temp-sensor.o
 endif
 
 ifdef CONFIG_SND_SOC_MSM_STUB
@@ -197,6 +205,14 @@ ifeq ($(KERNEL_BUILD), 1)
 	obj-y	+= wcd9360/
 	obj-y	+= wcd937x/
 endif
+ifdef CONFIG_SND_SOC_TAS2562
+	obj-y	 += tas2562/
+endif
+
+ifeq ($(CONFIG_SND_SOC_GCOV), y)
+GCOV_PROFILE := y
+endif
+
 # Module information used by KBuild framework
 obj-$(CONFIG_WCD9XXX_CODEC_CORE) += wcd_core_dlkm.o
 wcd_core_dlkm-y := $(CORE_OBJS)
@@ -209,6 +225,9 @@ wcd9335_dlkm-y := $(WCD9335_OBJS)
 
 obj-$(CONFIG_SND_SOC_WSA881X) += wsa881x_dlkm.o
 wsa881x_dlkm-y := $(WSA881X_OBJS)
+
+obj-$(CONFIG_SND_SOC_WSA881X_ANALOG) += wsa881x_analog_dlkm.o
+wsa881x_analog_dlkm-y := $(WSA881X_ANALOG_OBJS)
 
 obj-$(CONFIG_SND_SOC_MSM_STUB) += stub_dlkm.o
 stub_dlkm-y := $(STUB_OBJS)

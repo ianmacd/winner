@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -54,14 +54,15 @@ MODULE_DEVICE_TABLE(of, msm_match_table);
 #define WAKEUP_SRC_TIMEOUT		(2000)
 #define MAX_RETRY_COUNT			3
 #define NCI_RESET_CMD_LEN		4
-#define NCI_INIT_CMD_LEN		3
-#define NCI_RESET_RSP_LEN		6
-#define NCI_INIT_RSP_LEN		28
-
+#define NCI_RESET_RSP_LEN		4
+#define NCI_RESET_NTF_LEN		13
+#define NCI_GET_VERSION_CMD_LEN		8
+#define NCI_GET_VERSION_RSP_LEN		12
 
 struct nqx_dev {
 	wait_queue_head_t	read_wq;
 	struct	mutex		read_mutex;
+	struct	mutex		dev_ref_mutex;
 	struct	i2c_client	*client;
 	dev_t			devno;
 	struct class		*nqx_class;
@@ -82,6 +83,8 @@ struct nqx_dev {
 	bool			irq_wake_up;
 	spinlock_t		irq_enabled_lock;
 	unsigned int		count_irq;
+	/* NFC_IRQ Count */
+	unsigned int		dev_ref_count;
 	/* Initial CORE RESET notification */
 	unsigned int		core_reset_ntf;
 	/* CLK control */
@@ -329,6 +332,52 @@ static int nqx_standby_write(struct nqx_dev *nqx_dev,
 }
 
 /*
+ * Power management of the SN100 eSE
+ * eSE and NFCC both are powered using VEN gpio in SN100,
+ * VEN HIGH - eSE and NFCC both are powered on
+ * VEN LOW - eSE and NFCC both are power down
+ */
+static int sn100_ese_pwr(struct nqx_dev *nqx_dev, unsigned long int arg)
+{
+	int r = -1;
+
+	if (arg == 0) {
+		/**
+		 * Let's store the NFC VEN pin state
+		 * will check stored value in case of eSE power off request,
+		 * to find out if NFC MW also sent request to set VEN HIGH
+		 * VEN state will remain HIGH if NFC is enabled otherwise
+		 * it will be set as LOW
+		 */
+		nqx_dev->nfc_ven_enabled =
+			gpio_get_value(nqx_dev->en_gpio);
+		if (!nqx_dev->nfc_ven_enabled) {
+			dev_dbg(&nqx_dev->client->dev, "eSE HAL service setting en_gpio HIGH\n");
+			gpio_set_value(nqx_dev->en_gpio, 1);
+			/* hardware dependent delay */
+			usleep_range(1000, 1100);
+		} else {
+			dev_dbg(&nqx_dev->client->dev, "en_gpio already HIGH\n");
+		}
+		r = 0;
+	} else if (arg == 1) {
+		if (!nqx_dev->nfc_ven_enabled) {
+			dev_dbg(&nqx_dev->client->dev, "NFC not enabled, disabling en_gpio\n");
+			gpio_set_value(nqx_dev->en_gpio, 0);
+			/* hardware dependent delay */
+			usleep_range(1000, 1100);
+		} else {
+			dev_dbg(&nqx_dev->client->dev, "keep en_gpio high as NFC is enabled\n");
+		}
+		r = 0;
+	} else if (arg == 3) {
+		// eSE power state
+		r = gpio_get_value(nqx_dev->en_gpio);
+	}
+	return r;
+}
+
+/*
  * Power management of the eSE
  * NFC & eSE ON : NFC_EN high and eSE_pwr_req high.
  * NFC OFF & eSE ON : NFC_EN high and eSE_pwr_req high.
@@ -442,16 +491,56 @@ static int nqx_ese_pwr(struct nqx_dev *nqx_dev, unsigned long int arg)
 
 static int nfc_open(struct inode *inode, struct file *filp)
 {
-	int ret = 0;
 	struct nqx_dev *nqx_dev = container_of(inode->i_cdev,
 				struct nqx_dev, c_dev);
 
 	filp->private_data = nqx_dev;
 	nqx_init_stat(nqx_dev);
 
+	mutex_lock(&nqx_dev->dev_ref_mutex);
+
+	if (nqx_dev->dev_ref_count == 0) {
+		nqx_enable_irq(nqx_dev);
+
+		if (gpio_is_valid(nqx_dev->firm_gpio)) {
+			gpio_set_value(nqx_dev->firm_gpio, 0);
+			usleep_range(10000, 10100);
+		}
+	}
+
+	nqx_dev->dev_ref_count = nqx_dev->dev_ref_count + 1;
+
+	mutex_unlock(&nqx_dev->dev_ref_mutex);
+
 	dev_dbg(&nqx_dev->client->dev,
 			"%s: %d,%d\n", __func__, imajor(inode), iminor(inode));
-	return ret;
+	return 0;
+}
+
+static int nfc_close(struct inode *inode, struct file *filp)
+{
+	struct nqx_dev *nqx_dev = container_of(inode->i_cdev,
+				struct nqx_dev, c_dev);
+
+	mutex_lock(&nqx_dev->dev_ref_mutex);
+
+	if (nqx_dev->dev_ref_count == 1) {
+		nqx_disable_irq(nqx_dev);
+
+		if (gpio_is_valid(nqx_dev->firm_gpio)) {
+			gpio_set_value(nqx_dev->firm_gpio, 0);
+			usleep_range(10000, 10100);
+		}
+	}
+
+	if (nqx_dev->dev_ref_count > 0)
+		nqx_dev->dev_ref_count = nqx_dev->dev_ref_count - 1;
+
+	mutex_unlock(&nqx_dev->dev_ref_mutex);
+
+	filp->private_data = NULL;
+
+	return 0;
 }
 
 /*
@@ -500,6 +589,7 @@ int nfc_ioctl_power_states(struct file *filp, unsigned long arg)
 			gpio_set_value(nqx_dev->en_gpio, 0);
 			usleep_range(10000, 10100);
 		}
+
 		if (nqx_dev->pdata->clk_pin_voting) {
 			r = nqx_clock_deselect(nqx_dev);
 			if (r < 0)
@@ -515,8 +605,14 @@ int nfc_ioctl_power_states(struct file *filp, unsigned long arg)
 			gpio_set_value(nqx_dev->firm_gpio, 0);
 			usleep_range(10000, 10100);
 		}
-		gpio_set_value(nqx_dev->en_gpio, 1);
-		usleep_range(10000, 10100);
+
+		if (gpio_get_value(nqx_dev->en_gpio)) {
+			dev_dbg(&nqx_dev->client->dev, "VEN gpio already high\n");
+		} else {
+			gpio_set_value(nqx_dev->en_gpio, 1);
+			usleep_range(10000, 10100);
+		}
+
 		if (nqx_dev->pdata->clk_pin_voting) {
 			r = nqx_clock_select(nqx_dev);
 			if (r < 0)
@@ -645,16 +741,28 @@ static long nfc_ioctl(struct file *pfile, unsigned int cmd,
 			unsigned long arg)
 {
 	int r = 0;
+	struct nqx_dev *nqx_dev = pfile->private_data;
+
+	if (!nqx_dev)
+		return -ENODEV;
 
 	switch (cmd) {
 	case NFC_SET_PWR:
 		r = nfc_ioctl_power_states(pfile, arg);
 		break;
 	case ESE_SET_PWR:
-		r = nqx_ese_pwr(pfile->private_data, arg);
+		if ((nqx_dev->nqx_info.info.chip_type == NFCC_SN100_A) ||
+			(nqx_dev->nqx_info.info.chip_type == NFCC_SN100_B))
+			r = sn100_ese_pwr(nqx_dev, arg);
+		else
+			r = nqx_ese_pwr(nqx_dev, arg);
 		break;
 	case ESE_GET_PWR:
-		r = nqx_ese_pwr(pfile->private_data, 3);
+		if ((nqx_dev->nqx_info.info.chip_type == NFCC_SN100_A) ||
+			(nqx_dev->nqx_info.info.chip_type == NFCC_SN100_B))
+			r = sn100_ese_pwr(nqx_dev, 3);
+		else
+			r = nqx_ese_pwr(nqx_dev, 3);
 		break;
 	case SET_RX_BLOCK:
 		break;
@@ -678,6 +786,7 @@ static const struct file_operations nfc_dev_fops = {
 	.read  = nfc_read,
 	.write = nfc_write,
 	.open = nfc_open,
+	.release = nfc_close,
 	.unlocked_ioctl = nfc_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = nfc_compat_ioctl
@@ -690,12 +799,13 @@ static int nfcc_hw_check(struct i2c_client *client, struct nqx_dev *nqx_dev)
 	int ret = 0;
 
 	int gpio_retry_count = 0;
-	unsigned char init_rsp_len = 0;
+	unsigned char reset_ntf_len = 0;
 	unsigned int enable_gpio = nqx_dev->en_gpio;
 	char *nci_reset_cmd = NULL;
-	char *nci_init_cmd = NULL;
-	char *nci_init_rsp = NULL;
 	char *nci_reset_rsp = NULL;
+	char *nci_reset_ntf = NULL;
+	char *nci_get_version_cmd = NULL;
+	char *nci_get_version_rsp = NULL;
 
 	nci_reset_cmd = kzalloc(NCI_RESET_CMD_LEN + 1, GFP_DMA | GFP_KERNEL);
 	if (!nci_reset_cmd) {
@@ -709,20 +819,31 @@ static int nfcc_hw_check(struct i2c_client *client, struct nqx_dev *nqx_dev)
 		goto done;
 	}
 
-	nci_init_cmd = kzalloc(NCI_INIT_CMD_LEN + 1,  GFP_DMA | GFP_KERNEL);
-	if (!nci_init_cmd) {
+	nci_reset_ntf = kzalloc(NCI_RESET_NTF_LEN + 1,  GFP_DMA | GFP_KERNEL);
+	if (!nci_reset_ntf) {
 		ret = -ENOMEM;
 		goto done;
 	}
 
-	nci_init_rsp = kzalloc(NCI_INIT_RSP_LEN + 1,  GFP_DMA | GFP_KERNEL);
-	if (!nci_init_rsp) {
+	nci_get_version_cmd = kzalloc(NCI_GET_VERSION_CMD_LEN + 1,
+					GFP_DMA | GFP_KERNEL);
+	if (!nci_get_version_cmd) {
+		ret = -ENOMEM;
+		goto done;
+	}
+
+	nci_get_version_rsp = kzalloc(NCI_GET_VERSION_RSP_LEN + 1,
+					GFP_DMA | GFP_KERNEL);
+	if (!nci_get_version_rsp) {
 		ret = -ENOMEM;
 		goto done;
 	}
 
 reset_enable_gpio:
 	/* making sure that the NFCC starts in a clean state. */
+	gpio_set_value(enable_gpio, 1);/* HPD : Enable*/
+	/* hardware dependent delay */
+	usleep_range(10000, 10100);
 	gpio_set_value(enable_gpio, 0);/* ULPM: Disable */
 	/* hardware dependent delay */
 	usleep_range(10000, 10100);
@@ -738,11 +859,62 @@ reset_enable_gpio:
 	ret = i2c_master_send(client, nci_reset_cmd, NCI_RESET_CMD_LEN);
 	if (ret < 0) {
 		dev_err(&client->dev,
-		"%s: - i2c_master_send Error\n", __func__);
+		"%s: - i2c_master_send core reset Error\n", __func__);
+
+		if (gpio_is_valid(nqx_dev->firm_gpio)) {
+			gpio_set_value(nqx_dev->firm_gpio, 1);
+			usleep_range(10000, 10100);
+		}
+		gpio_set_value(nqx_dev->en_gpio, 0);
+		usleep_range(10000, 10100);
+		gpio_set_value(nqx_dev->en_gpio, 1);
+		usleep_range(10000, 10100);
+
+		nci_get_version_cmd[0] = 0x00;
+		nci_get_version_cmd[1] = 0x04;
+		nci_get_version_cmd[2] = 0xF1;
+		nci_get_version_cmd[3] = 0x00;
+		nci_get_version_cmd[4] = 0x00;
+		nci_get_version_cmd[5] = 0x00;
+		nci_get_version_cmd[6] = 0x6E;
+		nci_get_version_cmd[7] = 0xEF;
+		ret = i2c_master_send(client, nci_get_version_cmd,
+						NCI_GET_VERSION_CMD_LEN);
+
+		if (ret < 0) {
+			dev_err(&client->dev,
+				"%s: - i2c_master_send get version cmd Error\n",
+				__func__);
+			goto err_nfcc_hw_check;
+		}
+		/* hardware dependent delay */
+		usleep_range(10000, 10100);
+
+		ret = i2c_master_recv(client, nci_get_version_rsp,
+						NCI_GET_VERSION_RSP_LEN);
+		if (ret < 0) {
+			dev_err(&client->dev,
+				"%s: - i2c_master_recv get version rsp Error\n",
+				__func__);
+			goto err_nfcc_hw_check;
+		} else {
+			nqx_dev->nqx_info.info.chip_type =
+				nci_get_version_rsp[3];
+			nqx_dev->nqx_info.info.rom_version =
+				nci_get_version_rsp[4];
+			nqx_dev->nqx_info.info.fw_minor =
+				nci_get_version_rsp[6];
+			nqx_dev->nqx_info.info.fw_major =
+				nci_get_version_rsp[7];
+		}
+		goto err_nfcc_reset_failed;
+	}
+	nqx_enable_irq(nqx_dev);
+	ret = wait_event_interruptible(nqx_dev->read_wq, !nqx_dev->irq_enabled);
+	if (ret < 0) {
+		nqx_disable_irq(nqx_dev);
 		goto err_nfcc_hw_check;
 	}
-	/* hardware dependent delay */
-	msleep(30);
 
 	/* Read Response of RESET command */
 	ret = i2c_master_recv(client, nci_reset_rsp, NCI_RESET_RSP_LEN);
@@ -754,40 +926,38 @@ reset_enable_gpio:
 			goto reset_enable_gpio;
 		goto err_nfcc_hw_check;
 	}
-	nci_init_cmd[0] = 0x20;
-	nci_init_cmd[1] = 0x01;
-	nci_init_cmd[2] = 0x00;
-	ret = nqx_standby_write(nqx_dev, nci_init_cmd, NCI_INIT_CMD_LEN);
+	nqx_enable_irq(nqx_dev);
+	ret = wait_event_interruptible(nqx_dev->read_wq, !nqx_dev->irq_enabled);
 	if (ret < 0) {
-		dev_err(&client->dev,
-		"%s: - i2c_master_send Error\n", __func__);
-		goto err_nfcc_core_init_fail;
+		nqx_disable_irq(nqx_dev);
+		goto err_nfcc_hw_check;
 	}
-	/* hardware dependent delay */
-	msleep(30);
-	/* Read Response of INIT command */
-	ret = i2c_master_recv(client, nci_init_rsp, NCI_INIT_RSP_LEN);
+
+	/* Read Notification of RESET command */
+	ret = i2c_master_recv(client, nci_reset_ntf, NCI_RESET_NTF_LEN);
 	if (ret < 0) {
 		dev_err(&client->dev,
 		"%s: - i2c_master_recv Error\n", __func__);
-		goto err_nfcc_core_init_fail;
+		goto err_nfcc_hw_check;
 	}
-	init_rsp_len = 2 + nci_init_rsp[2]; /*payload + len*/
-	if (init_rsp_len > PAYLOAD_HEADER_LENGTH) {
+
+	reset_ntf_len = 2 + nci_reset_ntf[2]; /*payload + len*/
+	if (reset_ntf_len > PAYLOAD_HEADER_LENGTH) {
 		nqx_dev->nqx_info.info.chip_type =
-				nci_init_rsp[init_rsp_len - 3];
+				nci_reset_ntf[reset_ntf_len - 3];
 		nqx_dev->nqx_info.info.rom_version =
-				nci_init_rsp[init_rsp_len - 2];
+				nci_reset_ntf[reset_ntf_len - 2];
 		nqx_dev->nqx_info.info.fw_major =
-				nci_init_rsp[init_rsp_len - 1];
+				nci_reset_ntf[reset_ntf_len - 1];
 		nqx_dev->nqx_info.info.fw_minor =
-				nci_init_rsp[init_rsp_len];
+				nci_reset_ntf[reset_ntf_len];
 	}
 	dev_dbg(&client->dev,
 		"%s: - nq - reset cmd answer : NfcNciRx %x %x %x\n",
 		__func__, nci_reset_rsp[0],
 		nci_reset_rsp[1], nci_reset_rsp[2]);
 
+err_nfcc_reset_failed:
 	dev_dbg(&nqx_dev->client->dev, "NQ NFCC chip_type = %x\n",
 		nqx_dev->nqx_info.info.chip_type);
 	dev_dbg(&nqx_dev->client->dev, "NQ fw version = %x.%x.%x\n",
@@ -796,14 +966,6 @@ reset_enable_gpio:
 		nqx_dev->nqx_info.info.fw_minor);
 
 	switch (nqx_dev->nqx_info.info.chip_type) {
-	case NFCC_NQ_210:
-		dev_dbg(&client->dev,
-		"%s: ## NFCC == NQ210 ##\n", __func__);
-		break;
-	case NFCC_NQ_220:
-		dev_dbg(&client->dev,
-		"%s: ## NFCC == NQ220 ##\n", __func__);
-		break;
 	case NFCC_NQ_310:
 		dev_dbg(&client->dev,
 		"%s: ## NFCC == NQ310 ##\n", __func__);
@@ -816,22 +978,20 @@ reset_enable_gpio:
 		dev_dbg(&client->dev,
 		"%s: ## NFCC == PN66T ##\n", __func__);
 		break;
+	case NFCC_SN100_A:
+	case NFCC_SN100_B:
+		dev_dbg(&client->dev,
+		"%s: ## NFCC == SN100x ##\n", __func__);
+		break;
 	default:
 		dev_err(&client->dev,
 		"%s: - NFCC HW not Supported\n", __func__);
 		break;
 	}
 
-	/*Disable NFC by default to save power on boot*/
-	gpio_set_value(enable_gpio, 0);/* ULPM: Disable */
 	ret = 0;
+	nqx_dev->nfc_ven_enabled = true;
 	goto done;
-
-err_nfcc_core_init_fail:
-	dev_err(&client->dev,
-	"%s: - nq - reset cmd answer : NfcNciRx %x %x %x\n",
-	__func__, nci_reset_rsp[0],
-	nci_reset_rsp[1], nci_reset_rsp[2]);
 
 err_nfcc_hw_check:
 	ret = -ENXIO;
@@ -840,9 +1000,10 @@ err_nfcc_hw_check:
 
 done:
 	kfree(nci_reset_rsp);
-	kfree(nci_init_rsp);
-	kfree(nci_init_cmd);
+	kfree(nci_reset_ntf);
 	kfree(nci_reset_cmd);
+	kfree(nci_get_version_cmd);
+	kfree(nci_get_version_rsp);
 
 	return ret;
 }
@@ -1130,6 +1291,7 @@ static int nqx_probe(struct i2c_client *client,
 	/* init mutex and queues */
 	init_waitqueue_head(&nqx_dev->read_wq);
 	mutex_init(&nqx_dev->read_mutex);
+	mutex_init(&nqx_dev->dev_ref_mutex);
 	spin_lock_init(&nqx_dev->irq_enabled_lock);
 
 	r = alloc_chrdev_region(&nqx_dev->devno, 0, DEV_COUNT, DEVICE_NAME);
@@ -1278,6 +1440,7 @@ static int nqx_remove(struct i2c_client *client)
 	class_destroy(nqx_dev->nqx_class);
 	unregister_chrdev_region(nqx_dev->devno, DEV_COUNT);
 	mutex_destroy(&nqx_dev->read_mutex);
+	mutex_destroy(&nqx_dev->dev_ref_mutex);
 	gpio_free(nqx_dev->clkreq_gpio);
 	/* optional gpio, not sure was configured in probe */
 	if (nqx_dev->ese_gpio > 0)

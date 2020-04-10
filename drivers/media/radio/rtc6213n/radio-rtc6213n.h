@@ -212,6 +212,7 @@ struct rtc6213n_device {
 	int rx_vol[VOLUME_NUM];
 	unsigned char blend_level;
 	unsigned int seekcfg2;
+	unsigned int blend_ofs;
 	int fmlna_gpio;
 };
 

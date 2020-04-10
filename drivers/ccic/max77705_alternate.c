@@ -447,7 +447,7 @@ static int max77705_vdm_process_discover_mode(void *data, char *vdm_data, int le
 		if (usbpd_data->send_enter_mode_req == 0) {
 			msg_maxim("dex: second enter mode request");
 			usbpd_data->send_enter_mode_req = 1;
-			max77705_vdm_process_set_Dex_enter_mode_req(usbpd_data);
+		max77705_vdm_process_set_Dex_enter_mode_req(usbpd_data);
 		}
 	} else {
 		max77705_vdm_process_set_DP_enter_mode_req(usbpd_data);
@@ -1102,6 +1102,19 @@ void max77705_set_host_turn_on_event(int mode)
 		usbpd_data->detach_done_wait = 0;
 		usbpd_data->host_turn_on_event = 0;
 	}
+}
+
+int max77705_get_diplayport_status(void)
+{
+	struct max77705_usbc_platform_data *usbpd_data = NULL;
+
+	usbpd_data = g_usbc_data;
+
+	if (!usbpd_data)
+		return 0;
+
+	pr_info("%s : current dp status %d! \n", __func__, usbpd_data->dp_is_connect);
+	return usbpd_data->dp_is_connect;
 }
 
 void max77705_set_enable_alternate_mode(int mode)
@@ -1866,4 +1879,3 @@ void max77705_sec_uvdm_close(void)
 	complete(&usbpd_data->uvdm_longpacket_in_wait);
 	msg_maxim("success");
 }
-

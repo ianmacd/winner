@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -37,6 +37,8 @@
 #define CX_GMU_CBCR_SLEEP_SHIFT		4
 #define CX_GMU_CBCR_WAKE_MASK		0xf
 #define CX_GMU_CBCR_WAKE_SHIFT		8
+#define GFX3D_CRC_SID_FSM_CTRL		0x1024
+#define GFX3D_CRC_MND_CFG		0x1028
 
 #define F(f, s, h, m, n) { (f), (s), (2 * (h) - 1), (m), (n) }
 
@@ -49,10 +51,10 @@ enum {
 	P_GPLL0_OUT_MAIN,
 	P_GPLL0_OUT_MAIN_DIV,
 	P_GPU_CC_PLL0_2X_CLK,
-	P_GPU_CC_PLL0_OUT_AUX2,
+	P_CRC_DIV_PLL0_OUT_AUX2,
 	P_GPU_CC_PLL0_OUT_MAIN,
 	P_GPU_CC_PLL1_OUT_AUX,
-	P_GPU_CC_PLL1_OUT_AUX2,
+	P_CRC_DIV_PLL1_OUT_AUX2,
 	P_GPU_CC_PLL1_OUT_MAIN,
 };
 
@@ -77,9 +79,9 @@ static const char * const gpu_cc_parent_names_0[] = {
 static const struct parent_map gpu_cc_parent_map_1[] = {
 	{ P_BI_TCXO, 0 },
 	{ P_GPU_CC_PLL0_2X_CLK, 1 },
-	{ P_GPU_CC_PLL0_OUT_AUX2, 2 },
+	{ P_CRC_DIV_PLL0_OUT_AUX2, 2 },
 	{ P_GPU_CC_PLL1_OUT_AUX, 3 },
-	{ P_GPU_CC_PLL1_OUT_AUX2, 4 },
+	{ P_CRC_DIV_PLL1_OUT_AUX2, 4 },
 	{ P_GPLL0_OUT_MAIN, 5 },
 	{ P_CORE_BI_PLL_TEST_SE, 7 },
 };
@@ -87,9 +89,9 @@ static const struct parent_map gpu_cc_parent_map_1[] = {
 static const char * const gpu_cc_parent_names_1[] = {
 	"bi_tcxo",
 	"gpu_cc_pll0_out_aux",
-	"gpu_cc_pll0_out_aux2",
+	"crc_div_pll0_out_aux2",
 	"gpu_cc_pll1_out_aux",
-	"gpu_cc_pll1_out_aux2",
+	"crc_div_pll1_out_aux2",
 	"gpll0_out_main",
 	"core_bi_pll_test_se",
 };
@@ -189,14 +191,54 @@ static struct clk_rcg2 gpu_cc_gmu_clk_src = {
 	},
 };
 
+static struct clk_fixed_factor crc_div_pll0_out_aux2 = {
+	.mult = 1,
+	.div = 2,
+	.hw.init = &(struct clk_init_data){
+		.name = "crc_div_pll0_out_aux2",
+		.parent_names = (const char *[]){ "gpu_cc_pll0_out_aux2" },
+		.num_parents = 1,
+		.flags = CLK_SET_RATE_PARENT,
+		.ops = &clk_fixed_factor_ops,
+	},
+};
+
+static struct clk_fixed_factor crc_div_pll1_out_aux2 = {
+	.mult = 1,
+	.div = 2,
+	.hw.init = &(struct clk_init_data){
+		.name = "crc_div_pll1_out_aux2",
+		.parent_names = (const char *[]){ "gpu_cc_pll1_out_aux2" },
+		.num_parents = 1,
+		.flags = CLK_SET_RATE_PARENT,
+		.ops = &clk_fixed_factor_ops,
+	},
+};
+
 static const struct freq_tbl ftbl_gpu_cc_gx_gfx3d_clk_src[] = {
-	F(290000000, P_GPU_CC_PLL1_OUT_AUX2, 2, 0, 0),
-	F(435000000, P_GPU_CC_PLL1_OUT_AUX2, 2, 0, 0),
-	F(550000000, P_GPU_CC_PLL0_OUT_AUX2, 2, 0, 0),
-	F(700000000, P_GPU_CC_PLL0_OUT_AUX2, 2, 0, 0),
-	F(745000000, P_GPU_CC_PLL0_OUT_AUX2, 2, 0, 0),
-	F(845000000, P_GPU_CC_PLL0_OUT_AUX2, 2, 0, 0),
-	F(895000000, P_GPU_CC_PLL0_OUT_AUX2, 2, 0, 0),
+	F(290000000, P_CRC_DIV_PLL1_OUT_AUX2, 1, 0, 0),
+	F(350000000, P_CRC_DIV_PLL1_OUT_AUX2, 1, 0, 0),
+	F(435000000, P_CRC_DIV_PLL1_OUT_AUX2, 1, 0, 0),
+	F(500000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(550000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(650000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(700000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(745000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(845000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(895000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	{ }
+};
+
+static const struct freq_tbl ftbl_gpu_cc_gx_gfx3d_clk_src_sa6155[] = {
+	F(290000000, P_CRC_DIV_PLL1_OUT_AUX2, 1, 0, 0),
+	F(350000000, P_CRC_DIV_PLL1_OUT_AUX2, 1, 0, 0),
+	F(435000000, P_CRC_DIV_PLL1_OUT_AUX2, 1, 0, 0),
+	F(500000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(550000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(650000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(700000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(745000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
+	F(845000000, P_CRC_DIV_PLL0_OUT_AUX2, 1, 0, 0),
 	{ }
 };
 
@@ -254,14 +296,14 @@ static struct clk_branch gpu_cc_cx_apb_clk = {
 
 static struct clk_branch gpu_cc_cx_gfx3d_clk = {
 	.halt_reg = 0x10a4,
-	.halt_check = BRANCH_HALT,
+	.halt_check = BRANCH_HALT_DELAY,
 	.clkr = {
 		.enable_reg = 0x10a4,
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "gpu_cc_cx_gfx3d_clk",
 			.parent_names = (const char *[]){
-				"gpu_cc_gx_gfx3d_clk_src",
+				"gpu_cc_gx_gfx3d_clk",
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -408,6 +450,24 @@ static struct clk_branch gpu_cc_ahb_clk = {
 	},
 };
 
+static struct clk_branch gpu_cc_hlos1_vote_gpu_smmu_clk = {
+	.halt_reg = 0x5000,
+	.halt_check = BRANCH_VOTED,
+	.clkr = {
+		.enable_reg = 0x5000,
+		.enable_mask = BIT(0),
+		.hw.init = &(struct clk_init_data){
+			.name = "gpu_cc_hlos1_vote_gpu_smmu_clk",
+			.ops = &clk_branch2_ops,
+		},
+	},
+};
+
+struct clk_hw *gpu_cc_sm6150_hws[] = {
+	[CRC_DIV_PLL0_OUT_AUX2] = &crc_div_pll0_out_aux2.hw,
+	[CRC_DIV_PLL1_OUT_AUX2] = &crc_div_pll1_out_aux2.hw,
+};
+
 static struct clk_regmap *gpu_cc_sm6150_clocks[] = {
 	[GPU_CC_CRC_AHB_CLK] = &gpu_cc_crc_ahb_clk.clkr,
 	[GPU_CC_CX_APB_CLK] = &gpu_cc_cx_apb_clk.clkr,
@@ -425,6 +485,7 @@ static struct clk_regmap *gpu_cc_sm6150_clocks[] = {
 	[GPU_CC_GX_GFX3D_CLK] = &gpu_cc_gx_gfx3d_clk.clkr,
 	[GPU_CC_GX_GFX3D_CLK_SRC] = &gpu_cc_gx_gfx3d_clk_src.clkr,
 	[GPU_CC_AHB_CLK] = &gpu_cc_ahb_clk.clkr,
+	[GPU_CC_HLOS1_VOTE_GPU_SMMU_CLK] = &gpu_cc_hlos1_vote_gpu_smmu_clk.clkr,
 };
 
 static const struct regmap_config gpu_cc_sm6150_regmap_config = {
@@ -439,19 +500,33 @@ static const struct qcom_cc_desc gpu_cc_sm6150_desc = {
 	.config = &gpu_cc_sm6150_regmap_config,
 	.clks = gpu_cc_sm6150_clocks,
 	.num_clks = ARRAY_SIZE(gpu_cc_sm6150_clocks),
+	.hwclks = gpu_cc_sm6150_hws,
+	.num_hwclks = ARRAY_SIZE(gpu_cc_sm6150_hws),
 };
 
 static const struct of_device_id gpu_cc_sm6150_match_table[] = {
 	{ .compatible = "qcom,gpucc-sm6150" },
+	{ .compatible = "qcom,gpucc-sa6155" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, gpu_cc_sm6150_match_table);
+
+static void gpucc_sm6150_fixup_sa6155(struct platform_device *pdev)
+{
+	vdd_cx.num_levels = VDD_NUM_SA6155;
+	vdd_cx.cur_level = VDD_NUM_SA6155;
+	vdd_mx.num_levels = VDD_MX_NUM_SA6155;
+	vdd_mx.cur_level = VDD_MX_NUM_SA6155;
+	gpu_cc_gx_gfx3d_clk_src.clkr.hw.init->rate_max[VDD_HIGH_L1] = 0;
+	gpu_cc_gx_gfx3d_clk_src.freq_tbl = ftbl_gpu_cc_gx_gfx3d_clk_src_sa6155;
+}
 
 static int gpu_cc_sm6150_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap;
 	int ret;
 	unsigned int value, mask;
+	int is_sa6155;
 
 	/* Get CX voltage regulator for CX and GMU clocks. */
 	vdd_cx.regulator[0] = devm_regulator_get(&pdev->dev, "vdd_cx");
@@ -470,6 +545,11 @@ static int gpu_cc_sm6150_probe(struct platform_device *pdev)
 				"Unable to get vdd_mx regulator\n");
 		return PTR_ERR(vdd_mx.regulator[0]);
 	}
+
+	is_sa6155 = of_device_is_compatible(pdev->dev.of_node,
+						"qcom,gpucc-sa6155");
+	if (is_sa6155)
+		gpucc_sm6150_fixup_sa6155(pdev);
 
 	regmap = qcom_cc_map(pdev, &gpu_cc_sm6150_desc);
 	if (IS_ERR(regmap)) {
@@ -494,6 +574,14 @@ static int gpu_cc_sm6150_probe(struct platform_device *pdev)
 	value = 0xf << CX_GMU_CBCR_WAKE_SHIFT | 0xf << CX_GMU_CBCR_SLEEP_SHIFT;
 	regmap_update_bits(regmap, gpu_cc_cx_gmu_clk.clkr.enable_reg,
 							mask, value);
+
+	/* After POR, Clock Ramp Controller(CRC) will be in bypass mode.
+	 * Software needs to do the following operation to enable the CRC
+	 * for GFX3D clock and divide the input clock by div by 2.
+	 */
+	regmap_update_bits(regmap, GFX3D_CRC_MND_CFG, 0x00015011, 0x00015011);
+	regmap_update_bits(regmap,
+			GFX3D_CRC_SID_FSM_CTRL, 0x00800000, 0x00800000);
 
 	dev_info(&pdev->dev, "Registered GPU CC clocks\n");
 

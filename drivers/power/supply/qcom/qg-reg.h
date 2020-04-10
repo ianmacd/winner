@@ -1,4 +1,4 @@
-/* Copyright (c) 2018 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -42,6 +42,9 @@
 
 #define QG_INT_LATCHED_STS_REG			0x18
 #define FIFO_UPDATE_DONE_INT_LAT_STS_BIT	BIT(3)
+
+#define QG_STATE_TRIG_CMD_REG			0x40
+#define S7_PON_OCV_START			BIT(3)
 
 #define QG_DATA_CTL1_REG			0x41
 #define MASTER_HOLD_OR_CLR_BIT			BIT(0)
@@ -93,6 +96,8 @@
 #define QG_POST_ESR_V_DATA0_REG			0x7C
 #define QG_POST_ESR_I_DATA0_REG			0x7E
 
+#define QG_S2_NORMAL_AVG_V_DATA0_REG		0x80
+
 #define QG_V_ACCUM_DATA0_RT_REG			0x88
 #define QG_I_ACCUM_DATA0_RT_REG			0x8B
 #define QG_ACCUM_CNT_RT_REG			0x8E
@@ -123,6 +128,8 @@
 #define QG_SDAM_ESR_DISCHARGE_DELTA_OFFSET	0x6E /* 4-byte 0x6E-0x71 */
 #define QG_SDAM_ESR_CHARGE_SF_OFFSET		0x72 /* 2-byte 0x72-0x73 */
 #define QG_SDAM_ESR_DISCHARGE_SF_OFFSET		0x74 /* 2-byte 0x74-0x75 */
+#define QG_SDAM_BATT_AGE_LEVEL_OFFSET		0x76 /* 1-byte 0x76 */
+#define QG_SDAM_MAGIC_OFFSET			0x80 /* 4-byte 0x80-0x83 */
 #define QG_SDAM_MAX_OFFSET			0xA4
 
 /* Below offset is used by PBS */

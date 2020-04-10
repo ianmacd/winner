@@ -153,6 +153,7 @@ static void mmc_host_clk_gate_delayed(struct mmc_host *host)
 		mmc_gate_clock(host);
 		spin_lock_irqsave(&host->clk_lock, flags);
 		pr_debug("%s: gated MCI clock\n", mmc_hostname(host));
+		MMC_TRACE(host, "clocks are gated\n");
 	}
 	spin_unlock_irqrestore(&host->clk_lock, flags);
 	mutex_unlock(&host->clk_gate_mutex);
@@ -191,6 +192,7 @@ void mmc_host_clk_hold(struct mmc_host *host)
 
 		spin_lock_irqsave(&host->clk_lock, flags);
 		pr_debug("%s: ungated MCI clock\n", mmc_hostname(host));
+		MMC_TRACE(host, "clocks are ungated\n");
 	}
 	host->clk_requests++;
 	spin_unlock_irqrestore(&host->clk_lock, flags);
@@ -733,6 +735,7 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 	host->max_req_size = PAGE_SIZE;
 	host->max_blk_size = 512;
 	host->max_blk_count = PAGE_SIZE / 512;
+	host->ios.power_delay_ms = 10;
 
 	return host;
 }

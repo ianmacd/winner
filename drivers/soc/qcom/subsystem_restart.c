@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -46,6 +46,10 @@
 #ifdef CONFIG_SEC_DEBUG
 #include <linux/sec_debug.h>
 #endif
+#ifdef CONFIG_SUPPORT_AK0997X
+#include <linux/of_gpio.h>
+#endif
+
 
 #define DISABLE_SSR 0x9889deed
 /* If set to 0x9889deed, call to subsystem_restart_dev() returns immediately */
@@ -55,7 +59,7 @@ module_param(disable_restart_work, uint, 0644);
 static int enable_debug;
 module_param(enable_debug, int, 0644);
 
-static bool silent_ssr;
+static bool silent_ssr[N_SSR];
 #define STOP_REASON_0_BIT 0x10
 #define STOP_REASON_1_BIT 0x20
 
@@ -571,7 +575,9 @@ static void notif_timeout_handler(unsigned long data)
 	default:
 		SSR_NOTIF_TIMEOUT_WARN(unknown_err_msg);
 	}
-
+#ifdef CONFIG_SEC_DEBUG
+	sec_debug_summary_set_timeout_subsys(timeout_data->source_name, timeout_data->dest_name);
+#endif
 }
 
 static void _setup_timeout(struct subsys_desc *source_ss,
@@ -648,6 +654,22 @@ static int for_each_subsys_device(struct subsys_device **list,
 	return 0;
 }
 
+static void subsys_notif_uevent(struct subsys_desc *desc,
+				enum subsys_notif_type notif)
+{
+	char *envp[3];
+
+	if (notif == SUBSYS_AFTER_POWERUP) {
+		envp[0] = kasprintf(GFP_KERNEL, "SUBSYSTEM=%s", desc->name);
+		envp[1] = kasprintf(GFP_KERNEL, "NOTIFICATION=%d", notif);
+		envp[2] = NULL;
+		kobject_uevent_env(&desc->dev->kobj, KOBJ_CHANGE, envp);
+		pr_debug("%s %s sent\n", envp[0], envp[1]);
+		kfree(envp[1]);
+		kfree(envp[0]);
+	}
+}
+
 static void notify_each_subsys_device(struct subsys_device **list,
 		unsigned int count,
 		enum subsys_notif_type notif, void *data)
@@ -694,6 +716,7 @@ static void notify_each_subsys_device(struct subsys_device **list,
 								&notif_data);
 		cancel_timeout(dev->desc);
 		trace_pil_notif("after_send_notif", notif, dev->desc->fw_name);
+		subsys_notif_uevent(dev->desc, notif);
 	}
 }
 
@@ -998,7 +1021,7 @@ void *__subsystem_get(const char *name, const char *fw_name)
 		goto err_module;
 	}
 
-	subsys_d = subsystem_get(subsys->desc->depends_on);
+	subsys_d = subsystem_get(subsys->desc->pon_depends_on);
 	if (IS_ERR(subsys_d)) {
 		retval = subsys_d;
 		goto err_depends;
@@ -1078,6 +1101,15 @@ void subsystem_put(void *subsystem)
 	if (IS_ERR_OR_NULL(subsys))
 		return;
 
+	/* 
+	 * When pm_proxy_helper put modem, it also shuts down esoc0.
+	 * If this occurs after ril's first voting, then esoc cannot be 
+	 * powered on again unless ril restarts.
+	 */
+	subsys_d = find_subsys_device(subsys->desc->poff_depends_on);
+	if (subsys_d && strncmp("pm_proxy_helper", current->comm, strlen("pm_proxy_helper")))
+		subsystem_put(subsys_d);
+
 	track = subsys_get_track(subsys);
 	mutex_lock(&track->lock);
 	pr_err("%s: %s count:%d\n", __func__, subsys->desc->name, subsys->count);
@@ -1106,11 +1138,6 @@ void subsystem_put(void *subsystem)
 	}
 	mutex_unlock(&track->lock);
 
-	subsys_d = find_subsys_device(subsys->desc->depends_on);
-	if (subsys_d) {
-		subsystem_put(subsys_d);
-		put_device(&subsys_d->dev);
-	}
 	module_put(subsys->owner);
 	put_device(&subsys->dev);
 	return;
@@ -1302,7 +1329,7 @@ void subsys_set_reset_reason(const char *name, int val)
 int subsystem_restart_dev(struct subsys_device *dev)
 {
 	const char *name;
-	int ssr_enable = 1;
+	int ssr_disable = 1;
 
 	if (!get_device(&dev->dev))
 		return -ENODEV;
@@ -1316,35 +1343,47 @@ int subsystem_restart_dev(struct subsys_device *dev)
 
 	send_early_notifications(dev->early_notify);
 
-	if ((sec_debug_is_modem_separate_debug_ssr() ==
-	    SEC_DEBUG_MODEM_SEPARATE_EN)
-	    && strcmp(name, "slpi")
-	    && strcmp(name, "adsp")) {
+	if ((sec_debug_summary_is_modem_separate_debug_ssr() ==
+		SEC_DEBUG_MODEM_SEPARATE_EN)
+		&& strcmp(name, "slpi")
+		&& strcmp(name, "adsp")) {
 		pr_info("SSR separated by cp magic!!\n");
-		ssr_enable = sec_debug_is_enabled_for_ssr();
+		ssr_disable = sec_debug_is_enabled_for_ssr();
 	} else
 		pr_info("SSR by only ap debug level!!\n");
 
-	if (!sec_debug_is_enabled() || (!ssr_enable))
+	if (!sec_debug_is_enabled() || (!ssr_disable))
 		dev->restart_level = RESET_SUBSYS_COUPLED;
 	else
 		dev->restart_level = RESET_SOC;
-
+	
 	if (!strncmp(name, "modem", 5)) {
-		if (silent_ssr)  /* qcrtr ioctl force silent ssr */
+		if (silent_ssr[MODEM_SSR])  /* qcrtr ioctl force silent ssr */
 			dev->restart_level = RESET_SUBSYS_COUPLED;
+		del_timer(&dev->desc->timeout_data.timer);
 		
 		qcom_smem_state_update_bits(dev->desc->state,
 				BIT(dev->desc->force_stop_bit), 0);
 		subsys_set_reset_reason(name, 0);
-		silent_ssr = 0;
+		subsys_set_modem_silent_ssr(false, MODEM_SSR);
+	} else if (!strncmp(name, "esoc", 4) && silent_ssr[ESOC_SSR]) { 
+		dev->restart_level = RESET_SUBSYS_COUPLED;
+		subsys_set_modem_silent_ssr(false, ESOC_SSR);
 	}
 
-#if defined(CONFIG_SEC_FACTORY) &&  (defined(CONFIG_SEC_WINNERLTE_PROJECT) || \
-        defined(CONFIG_SEC_WINNERX_PROJECT))
-	if (is_pretest() && !strcmp(name, "slpi")) {
-		pr_info("PreTest is running. slpi ssr!!\n");
-		dev->restart_level = RESET_SUBSYS_COUPLED;
+
+#ifdef CONFIG_SENSORS_SSC
+	if (!strcmp(name, "slpi")) {
+#if defined(CONFIG_SEC_FACTORY) && defined(CONFIG_SUPPORT_DUAL_6AXIS)
+		if (is_pretest()) {	
+			pr_info("PreTest is running. slpi ssr!!\n");
+			dev->restart_level = RESET_SUBSYS_COUPLED;
+		}
+#endif
+		if (dev->desc->run_fssr) {
+			dev->restart_level = RESET_SUBSYS_COUPLED;
+			dev->desc->run_fssr = false;
+		}
 	}
 #endif
 	/*
@@ -1417,6 +1456,13 @@ int subsystem_crash(const char *name)
 		qcom_smem_state_update_bits(dev->desc->state,
 				BIT(dev->desc->force_stop_bit),
 				BIT(dev->desc->force_stop_bit));
+				
+		/* watchdog timeo work for modem, starts here */
+		if (!strncmp(dev->desc->name, "modem", 5)) {
+			pr_warn("set %dms timeout in case of no stop ack from CP\n", 
+							CONFIG_SSR_SYSMON_NOTIF_TIMEOUT);
+			setup_timeout(dev->desc, NULL, SUBSYS_TO_HLOS);
+		}
 	}
 	return 0;
 }
@@ -1446,15 +1492,29 @@ int is_subsystem_online(const char *name)
 EXPORT_SYMBOL(is_subsystem_online);
 #endif
 
+#ifdef CONFIG_SENSORS_SSC
+void subsys_set_fssr(struct subsys_device *dev, bool value)
+{
+	dev->desc->run_fssr = value;
+}
+#endif
+
+void subsys_set_modem_silent_ssr(bool value, int id)
+{
+	silent_ssr[id] = value;
+	pr_err("silent_ssr %s: %d\n", 
+			(id == MODEM_SSR) ? "modem" : "esoc", value);
+}
+EXPORT_SYMBOL(subsys_set_modem_silent_ssr);
+
 void subsys_force_stop(const char *name, bool val)
 {
 	if (strncmp(name, "modem", 5)) {
 		pr_err("only modem ssr supported %s: %d\n", name, val);
 		return;
 	}
-	silent_ssr = val;
-	pr_err("silent_ssr %s: %d\n", name, silent_ssr);
-	subsys_set_reset_reason(name, silent_ssr ? 0x20 : 0x10);
+	subsys_set_modem_silent_ssr(val, MODEM_SSR);
+	subsys_set_reset_reason(name, silent_ssr[MODEM_SSR] ? 0x20 : 0x10);
 	subsystem_crash(name);
 }
 EXPORT_SYMBOL(subsys_force_stop);
@@ -1827,6 +1887,14 @@ static int subsys_parse_devicetree(struct subsys_desc *desc)
 	if (ret && ret != -ENOENT)
 		return ret;
 
+#ifdef CONFIG_SUPPORT_AK0997X
+	desc->d_hall_rst_gpio = of_get_named_gpio(pdev->dev.of_node,
+		"qcom,gpio-d-hall-rst", 0);
+	if (desc->d_hall_rst_gpio > 0)
+		pr_info("%s, %s get digital hall rst success(%d)\n", __func__,
+			desc->name, desc->d_hall_rst_gpio);
+#endif
+
 	ret = __get_smem_state(desc, "qcom,force-stop", &desc->force_stop_bit);
 	if (ret && ret != -ENOENT)
 		return ret;
@@ -1847,6 +1915,14 @@ static int subsys_parse_devicetree(struct subsys_desc *desc)
 							PTR_ERR(order));
 		return PTR_ERR(order);
 	}
+
+	if (of_property_read_string(pdev->dev.of_node, "qcom,pon-depends-on",
+				&desc->pon_depends_on))
+		pr_debug("pon-depends-on not set for %s\n", desc->name);
+
+	if (of_property_read_string(pdev->dev.of_node, "qcom,poff-depends-on",
+				&desc->poff_depends_on))
+		pr_debug("poff-depends-on not set for %s\n", desc->name);
 
 	return 0;
 }

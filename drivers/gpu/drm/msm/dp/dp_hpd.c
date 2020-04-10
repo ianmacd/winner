@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,20 +21,53 @@
 #include "dp_hpd.h"
 #include "dp_usbpd.h"
 #include "dp_gpio_hpd.h"
+#include "dp_lphw_hpd.h"
 #ifdef CONFIG_SEC_DISPLAYPORT
 #include "secdp.h"
 #endif
 
-struct dp_hpd *dp_hpd_get(struct device *dev,
-	struct dp_parser *parser, struct dp_hpd_cb *cb)
+static void dp_hpd_host_init(struct dp_hpd *dp_hpd,
+		struct dp_catalog_hpd *catalog)
+{
+	if (!catalog) {
+		pr_err("invalid input");
+		return;
+	}
+	catalog->config_hpd(catalog, true);
+}
+
+static void dp_hpd_host_deinit(struct dp_hpd *dp_hpd,
+		struct dp_catalog_hpd *catalog)
+{
+	if (!catalog) {
+		pr_err("invalid input");
+		return;
+	}
+	catalog->config_hpd(catalog, false);
+}
+
+static void dp_hpd_isr(struct dp_hpd *dp_hpd)
+{
+}
+
+
+struct dp_hpd *dp_hpd_get(struct device *dev, struct dp_parser *parser,
+		struct dp_catalog_hpd *catalog, struct dp_hpd_cb *cb)
 {
 	struct dp_hpd *dp_hpd;
 
 	pr_debug("+++, no_aux_switch<%d>\n", parser->no_aux_switch);
 
-	if (parser->no_aux_switch) {
+	if (parser->no_aux_switch && parser->lphw_hpd) {
+		dp_hpd = dp_lphw_hpd_get(dev, parser, catalog, cb);
+		if (IS_ERR(dp_hpd)) {
+			pr_err("failed to get lphw hpd\n");
+			return dp_hpd;
+		}
+		dp_hpd->type = DP_HPD_LPHW;
+	} else if (parser->no_aux_switch) {
 		dp_hpd = dp_gpio_hpd_get(dev, cb);
-		if (!dp_hpd) {
+		if (IS_ERR(dp_hpd)) {
 			pr_err("failed to get gpio hpd\n");
 			goto out;
 		}
@@ -45,7 +78,7 @@ struct dp_hpd *dp_hpd_get(struct device *dev,
 #else
 		dp_hpd = secdp_usbpd_get(dev, cb);
 #endif
-		if (!dp_hpd) {
+		if (IS_ERR(dp_hpd)) {
 			pr_err("failed to get usbpd\n");
 			goto out;
 		}
@@ -53,6 +86,13 @@ struct dp_hpd *dp_hpd_get(struct device *dev,
 	}
 
 	pr_debug("type<%d>\n", dp_hpd->type);
+
+	if (!dp_hpd->host_init)
+		dp_hpd->host_init	= dp_hpd_host_init;
+	if (!dp_hpd->host_deinit)
+		dp_hpd->host_deinit	= dp_hpd_host_deinit;
+	if (!dp_hpd->isr)
+		dp_hpd->isr		= dp_hpd_isr;
 
 out:
 	return dp_hpd;
@@ -71,6 +111,9 @@ void dp_hpd_put(struct dp_hpd *dp_hpd)
 		break;
 	case DP_HPD_GPIO:
 		dp_gpio_hpd_put(dp_hpd);
+		break;
+	case DP_HPD_LPHW:
+		dp_lphw_hpd_put(dp_hpd);
 		break;
 	default:
 		pr_err("unknown hpd type %d\n", dp_hpd->type);

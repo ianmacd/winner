@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,6 +25,7 @@
 #include "rmnet_vnd.h"
 
 #include <soc/qcom/qmi_rmnet.h>
+#include <soc/qcom/rmnet_qmi.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/rmnet.h>
 
@@ -75,6 +76,7 @@ static netdev_tx_t rmnet_vnd_start_xmit(struct sk_buff *skb,
 		trace_rmnet_xmit_skb(skb);
 		rmnet_egress_handler(skb);
 		qmi_rmnet_burst_fc_check(dev, ip_type, mark, len);
+		qmi_rmnet_work_maybe_restart(rmnet_get_rmnet_port(dev));
 	} else {
 		this_cpu_inc(priv->pcpu_stats->stats.tx_drops);
 		kfree_skb(skb);
@@ -198,9 +200,33 @@ static const char rmnet_gstrings_stats[][ETH_GSTRING_LEN] = {
 	"Checksum skipped",
 	"Checksum computed in software",
 	"Checksum computed in hardware",
+	"Coalescing packets received",
+	"Coalesced packets",
+	"Coalescing header NLO errors",
+	"Coalescing header pcount errors",
+	"Coalescing checksum errors",
+	"Coalescing packet reconstructs",
+	"Coalescing IP version invalid",
+	"Coalescing L4 header invalid",
+	"Coalescing close Non-coalescable",
+	"Coalescing close L3 mismatch",
+	"Coalescing close L4 mismatch",
+	"Coalescing close HW NLO limit",
+	"Coalescing close HW packet limit",
+	"Coalescing close HW byte limit",
+	"Coalescing close HW time limit",
+	"Coalescing close HW eviction",
+	"Coalescing close Coalescable",
+	"Coalescing packets over VEID0",
+	"Coalescing packets over VEID1",
+	"Coalescing packets over VEID2",
+	"Coalescing packets over VEID3",
 };
 
 static const char rmnet_port_gstrings_stats[][ETH_GSTRING_LEN] = {
+	"MAP Cmd last version",
+	"MAP Cmd last ep id",
+	"MAP Cmd last transaction id",
 	"DL header last seen sequence",
 	"DL header last seen bytes",
 	"DL header last seen packets",
@@ -208,10 +234,10 @@ static const char rmnet_port_gstrings_stats[][ETH_GSTRING_LEN] = {
 	"DL header pkts received",
 	"DL header total bytes received",
 	"DL header total pkts received",
-	"DL header average bytes",
-	"DL header average packets",
 	"DL trailer last seen sequence",
 	"DL trailer pkts received",
+	"UL agg reuse",
+	"UL agg alloc",
 };
 
 static void rmnet_get_strings(struct net_device *dev, u32 stringset, u8 *buf)
@@ -262,6 +288,7 @@ static int rmnet_stats_reset(struct net_device *dev)
 {
 	struct rmnet_priv *priv = netdev_priv(dev);
 	struct rmnet_port_priv_stats *stp;
+	struct rmnet_priv_stats *st;
 	struct rmnet_port *port;
 
 	port = rmnet_get_port(priv->real_dev);
@@ -271,6 +298,11 @@ static int rmnet_stats_reset(struct net_device *dev)
 	stp = &port->stats;
 
 	memset(stp, 0, sizeof(*stp));
+
+	st = &priv->stats;
+
+	memset(st, 0, sizeof(*st));
+
 	return 0;
 }
 
@@ -300,10 +332,6 @@ void rmnet_vnd_setup(struct net_device *rmnet_dev)
 
 	rmnet_dev->needs_free_netdev = true;
 	rmnet_dev->ethtool_ops = &rmnet_ethtool_ops;
-
-	/* This perm addr will be used as interface identifier by IPv6 */
-	rmnet_dev->addr_assign_type = NET_ADDR_RANDOM;
-	eth_random_addr(rmnet_dev->perm_addr);
 }
 
 /* Exposed API */
@@ -313,7 +341,7 @@ int rmnet_vnd_newlink(u8 id, struct net_device *rmnet_dev,
 		      struct net_device *real_dev,
 		      struct rmnet_endpoint *ep)
 {
-	struct rmnet_priv *priv;
+	struct rmnet_priv *priv = netdev_priv(rmnet_dev);
 	int rc;
 
 	if (ep->egress_dev)
@@ -325,6 +353,9 @@ int rmnet_vnd_newlink(u8 id, struct net_device *rmnet_dev,
 	rmnet_dev->hw_features = NETIF_F_RXCSUM;
 	rmnet_dev->hw_features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
 	rmnet_dev->hw_features |= NETIF_F_SG;
+	rmnet_dev->hw_features |= NETIF_F_GRO_HW;
+
+	priv->real_dev = real_dev;
 
 	rc = register_netdevice(rmnet_dev);
 	if (!rc) {
@@ -334,9 +365,7 @@ int rmnet_vnd_newlink(u8 id, struct net_device *rmnet_dev,
 
 		rmnet_dev->rtnl_link_ops = &rmnet_link_ops;
 
-		priv = netdev_priv(rmnet_dev);
 		priv->mux_id = id;
-		priv->real_dev = real_dev;
 		priv->qos_info = qmi_rmnet_qos_init(real_dev, id);
 
 		netdev_dbg(rmnet_dev, "rmnet dev created\n");

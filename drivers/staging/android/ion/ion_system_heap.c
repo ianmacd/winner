@@ -116,8 +116,13 @@ void free_buffer_page(struct ion_system_heap *heap,
 			ion_page_pool_free_immediate(pool, page);
 		else
 			ion_page_pool_free(pool, page);
+
+		mod_node_page_state(page_pgdat(page), NR_UNRECLAIMABLE_PAGES,
+				    -(1 << pool->order));
 	} else {
 		__free_pages(page, order);
+		mod_node_page_state(page_pgdat(page), NR_UNRECLAIMABLE_PAGES,
+				    -(1 << order));
 	}
 }
 
@@ -317,6 +322,10 @@ static int ion_system_heap_allocate(struct ion_heap *heap,
 
 		sz = (1 << info->order) * PAGE_SIZE;
 
+		mod_node_page_state(
+				page_pgdat(info->page), NR_UNRECLAIMABLE_PAGES,
+				(1 << (info->order)));
+
 		if (info->from_pool) {
 			list_add_tail(&info->list, &pages_from_pool);
 		} else {
@@ -335,8 +344,10 @@ static int ion_system_heap_allocate(struct ion_heap *heap,
 		goto err;
 
 	table = kzalloc(sizeof(*table), GFP_KERNEL);
-	if (!table)
+	if (!table) {
+		ret = -ENOMEM;
 		goto err_free_data_pages;
+	}
 
 	ret = sg_alloc_table(table, i, GFP_KERNEL);
 	if (ret)
@@ -601,6 +612,13 @@ static int ion_system_heap_debug_show(struct ion_heap *heap, struct seq_file *s,
 }
 
 static struct ion_system_heap *system_heap;
+
+unsigned int get_ion_system_heap_id(void)
+{
+	if (system_heap)
+		return system_heap->heap.id;
+	return -ENODEV;
+}
 
 static void show_ion_system_heap_pool_size(struct seq_file *s)
 {

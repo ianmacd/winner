@@ -68,12 +68,12 @@ int ufs_qcom_phy_qmp_v4_phy_calibrate(struct ufs_qcom_phy *ufs_qcom_phy,
 		if (check_v2(major, minor, step)) {
 			if (!is_g4)
 				ufs_qcom_phy_write_tbl(ufs_qcom_phy,
-					phy_cal_table_2nd_lane_v2_g3,
-					ARRAY_SIZE(phy_cal_table_2nd_lane_v2_g3));
+				   phy_cal_table_2nd_lane_v2_g3,
+				   ARRAY_SIZE(phy_cal_table_2nd_lane_v2_g3));
 			else
 				ufs_qcom_phy_write_tbl(ufs_qcom_phy,
-					phy_cal_table_2nd_lane_v2_g4,
-					ARRAY_SIZE(phy_cal_table_2nd_lane_v2_g4));
+				   phy_cal_table_2nd_lane_v2_g4,
+				   ARRAY_SIZE(phy_cal_table_2nd_lane_v2_g4));
 		}
 	}
 

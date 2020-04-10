@@ -150,7 +150,6 @@ int qti_pfk_ice_set_key(uint32_t index, uint8_t *key, uint8_t *salt,
 
 	pr_debug("%s: Setting keys with QSEE kernel\n", __func__); 
 	ret = set_key(index, key, salt, data_unit);
-
 	if (ret) {
 		pr_err("%s: Set Key Error: %d\n", __func__, ret);
 		if (ret == -EBUSY) {
@@ -158,9 +157,8 @@ int qti_pfk_ice_set_key(uint32_t index, uint8_t *key, uint8_t *salt,
 				pr_err("%s: clock disable failed\n", __func__);
 				goto out;
 		}
-
+		/* Try to invalidate the key to keep ICE in proper state */
 		ret1 = clear_key(index);
-
 		if (ret1)
 			pr_err("%s: Invalidate key error: %d\n", __func__, ret);
 	}
@@ -195,7 +193,6 @@ int qti_pfk_ice_invalidate_key(uint32_t index, char *storage_type)
 
 	pr_debug("%s: Clearing keys with QSEE kernel\n", __func__); 
 	ret = clear_key(index);
-
 	if (ret)
 		pr_err("%s: Invalidate key error: %d\n", __func__, ret);
 

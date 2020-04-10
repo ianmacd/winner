@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,6 +17,9 @@
 #include <linux/types.h>
 #include <drm/drm_mipi_dsi.h>
 #include "msm_drv.h"
+
+#define MAX_EXT_BRIDGE_PORT_CONFIG             16
+#define MAX_DSI_CTRLS_PER_DISPLAY             2
 
 #define DSI_H_TOTAL(t) (((t)->h_active) + ((t)->h_back_porch) + \
 			((t)->h_sync_width) + ((t)->h_front_porch))
@@ -36,7 +39,20 @@
 		value;\
 	})
 
+#define DSI_H_ACTIVE_DSC(t) \
+	({\
+		u64 value;\
+		if ((t)->dsc_enabled && (t)->dsc)\
+			value = (t)->dsc->pclk_per_line;\
+		else\
+			value = (t)->h_active;\
+		value;\
+	})
+
 #define DSI_DEBUG_NAME_LEN		32
+#define display_for_each_ctrl(index, display) \
+	for (index = 0; (index < (display)->ctrl_count) &&\
+			(index < MAX_DSI_CTRLS_PER_DISPLAY); index++)
 /**
  * enum dsi_pixel_format - DSI pixel formats
  * @DSI_PIXEL_FORMAT_RGB565:
@@ -79,6 +95,7 @@ enum dsi_op_mode {
  * @DSI_MODE_FLAG_DMS: Seamless transition is dynamic mode switch
  * @DSI_MODE_FLAG_VRR: Seamless transition is DynamicFPS.
  *                     New timing values are sent from DAL.
+ * @DSI_MODE_FLAG_DYN_CLK: Seamless transition is dynamic clock change
  */
 enum dsi_mode_flags {
 	DSI_MODE_FLAG_SEAMLESS			= BIT(0),
@@ -86,6 +103,7 @@ enum dsi_mode_flags {
 	DSI_MODE_FLAG_VBLANK_PRE_MODESET	= BIT(2),
 	DSI_MODE_FLAG_DMS			= BIT(3),
 	DSI_MODE_FLAG_VRR			= BIT(4),
+	DSI_MODE_FLAG_DYN_CLK			= BIT(5),
 };
 
 /**
@@ -248,6 +266,9 @@ enum dsi_dfps_type {
  */
 enum dsi_cmd_set_type {
 	DSI_CMD_SET_PRE_ON = 0,
+#if defined(CONFIG_DISPLAY_SAMSUNG)
+	DSI_CMD_SET_FD_ON_FACTORY,
+#endif
 	DSI_CMD_SET_ON,
 	DSI_CMD_SET_POST_ON,
 	DSI_CMD_SET_PRE_OFF,
@@ -281,6 +302,7 @@ enum dsi_cmd_set_type {
 
 	/* TX */
 	TX_CMD_START,
+	TX_MTP_WRITE_SYSFS,
 	TX_TEMP_DSC,
 	TX_DISPLAY_ON,
 	TX_DISPLAY_OFF,
@@ -328,11 +350,13 @@ enum dsi_cmd_set_type {
 	TX_HMT_LOW_PERSISTENCE_OFF_BRIGHT,
 	TX_HMT_REVERSE,
 	TX_HMT_FORWARD,
+	TX_HMT_GAMMA_MODE2_BRIGHT,
 	TX_FFC,
 	TX_DYNAMIC_FFC_SET,
 	TX_CABC_ON,
 	TX_CABC_OFF,
 	TX_TFT_PWM,
+	TX_GAMMA_MODE2,
 	TX_BLIC_DIMMING,
 	TX_LDI_SET_VDD_OFFSET,
 	TX_LDI_SET_VDDM_OFFSET,
@@ -384,7 +408,6 @@ enum dsi_cmd_set_type {
 	TX_ELVSS_LOWTEMP2,
 	TX_SMART_ACL_ELVSS,
 	TX_SMART_ACL_ELVSS_LOWTEMP,
-	TX_SMART_ACL_ELVSS_LOWTEMP2,
 	TX_VINT,
 	TX_IRC,
 	TX_IRC_SUBDIVISION,
@@ -421,6 +444,12 @@ enum dsi_cmd_set_type {
 	TX_GRAY_SPOT_TEST_OFF,
 	TX_ISC_DEFECT_TEST_ON,
 	TX_ISC_DEFECT_TEST_OFF,
+	TX_PARTIAL_DISP_ON,
+	TX_PARTIAL_DISP_OFF,
+	TX_DIA_ON,
+	TX_DIA_OFF,
+	TX_FP_GREEN_CIRCLE_ON,		/* Finger Print Green Circle */
+	TX_FP_GREEN_CIRCLE_OFF,
 	TX_SELF_IDLE_AOD_ENTER,
 	TX_SELF_IDLE_AOD_EXIT,
 	TX_SELF_IDLE_TIMER_ON,
@@ -430,6 +459,9 @@ enum dsi_cmd_set_type {
 	TX_SELF_IDLE_MOVE_ON_PATTERN3,
 	TX_SELF_IDLE_MOVE_ON_PATTERN4,
 	TX_SELF_IDLE_MOVE_OFF,
+	TX_SELF_MASK_CHECK_PRE1,
+	TX_SELF_MASK_CHECK_PRE2,
+	TX_SELF_MASK_CHECK_POST,
 
 	/* SELF DISPLAY */
 	TX_SELF_DISP_CMD_START,
@@ -451,7 +483,10 @@ enum dsi_cmd_set_type {
 	TX_SELF_MASK_ON,
 	TX_SELF_MASK_ON_FACTORY,
 	TX_SELF_MASK_OFF,
+	TX_SELF_MASK_GREEN_CIRCLE_ON_FACTORY,
+	TX_SELF_MASK_GREEN_CIRCLE_OFF_FACTORY,
 	TX_SELF_MASK_IMAGE,
+	TX_SELF_MASK_IMAGE_CRC,
 	TX_SELF_ICON_SET_PRE,
 	TX_SELF_ICON_SET_POST,
 	TX_SELF_ICON_SIDE_MEM_SET,
@@ -491,11 +526,7 @@ enum dsi_cmd_set_type {
 	TX_SELF_VIDEO_ON,
 	TX_SELF_VIDEO_OFF,
 	TX_SELF_PARTIAL_HLPM_SCAN_SET,
-	RX_SELF_DISP_DEBUG,	
-	TX_SELF_MASK_CHECK_PRE1,
-	TX_SELF_MASK_CHECK_PRE2,
-	TX_SELF_MASK_CHECK_POST,
-	RX_SELF_MASK_CHECK,
+	RX_SELF_DISP_DEBUG,
 	TX_SELF_DISP_CMD_END,
 
 	/* FLASH GAMMA */
@@ -514,6 +545,8 @@ enum dsi_cmd_set_type {
 
 	TX_CCD_ON,
 	TX_CCD_OFF,
+	TX_DEMUX_STRESS_ON,
+	TX_DEMUX_STRESS_OFF,
 	TX_POC_COMP,
 
 	TX_FD_ON,
@@ -559,6 +592,7 @@ enum dsi_cmd_set_type {
 	RX_MCD_READ_RESISTANCE,  /* For read real MCD R/L resistance */
 	RX_FLASH_GAMMA,
 	RX_CCD_STATE,
+	RX_SELF_MASK_CHECK,
 	RX_CMD_END,
 
 	SS_DSI_CMD_SET_MAX,
@@ -680,6 +714,9 @@ struct dsi_panel_cmd_set {
  * @v_sync_polarity:  Polarity of VSYNC (false is active low).
  * @refresh_rate:     Refresh rate in Hz.
  * @clk_rate_hz:      DSI bit clock rate per lane in Hz.
+ * @mdp_transfer_time_us:   Specifies the mdp transfer time for command mode
+ *                    panels in microseconds.
+ * @overlap_pixels:   overlap pixels for certain panels.
  * @dsc_enabled:      DSC compression enabled.
  * @dsc:              DSC compression configuration.
  * @roi_caps:         Panel ROI capabilities.
@@ -700,9 +737,23 @@ struct dsi_mode_info {
 
 	u32 refresh_rate;
 	u64 clk_rate_hz;
+	u32 mdp_transfer_time_us;
+	u32 overlap_pixels;
 	bool dsc_enabled;
 	struct msm_display_dsc_info *dsc;
 	struct msm_roi_caps roi_caps;
+};
+
+/**
+ * struct dsi_split_link_config - Split Link Configuration
+ * @split_link_enabled:  Split Link Enabled.
+ * @num_sublinks:     Number of sublinks.
+ * @lanes_per_sublink:   Number of lanes per sublink.
+ */
+struct dsi_split_link_config {
+	bool split_link_enabled;
+	u32 num_sublinks;
+	u32 lanes_per_sublink;
 };
 
 /**
@@ -728,8 +779,11 @@ struct dsi_mode_info {
  * @ignore_rx_eot:       Ignore Rx EOT packets if set to true.
  * @append_tx_eot:       Append EOT packets for forward transmissions if set to
  *                       true.
- * @ext_bridge_mode:     External bridge is connected.
+ * @ext_bridge_num:      Connected external bridge count.
+ * @ext_bridge_map:      External bridge config reg needs to match with the port
+ *                       reg config.
  * @force_hs_clk_lane:   Send continuous clock to the panel.
+ * @dsi_split_link_config:  Split Link Configuration.
  */
 struct dsi_host_common_cfg {
 	enum dsi_pixel_format dst_format;
@@ -748,8 +802,10 @@ struct dsi_host_common_cfg {
 	u32 t_clk_pre;
 	bool ignore_rx_eot;
 	bool append_tx_eot;
-	bool ext_bridge_mode;
+	u32 ext_bridge_num;
+	u32 ext_bridge_map[MAX_DSI_CTRLS_PER_DISPLAY];
 	bool force_hs_clk_lane;
+	struct dsi_split_link_config split_link;
 };
 
 /**
@@ -777,7 +833,6 @@ struct dsi_video_engine_cfg {
 	bool hsa_lp11_en;
 	bool eof_bllp_lp11_en;
 	bool bllp_lp11_en;
-	bool force_clk_lane_hs;
 	enum dsi_video_traffic_mode traffic_mode;
 	u32 vc_id;
 	u32 dma_sched_line;
@@ -792,15 +847,12 @@ struct dsi_video_engine_cfg {
  * @wr_mem_continue:               DCS command for write_memory_continue.
  * @insert_dcs_command:            Insert DCS command as first byte of payload
  *                                 of the pixel data.
- * @mdp_transfer_time_us   Specifies the mdp transfer time for command mode
- *                         panels in microseconds
  */
 struct dsi_cmd_engine_cfg {
 	u32 max_cmd_packets_interleave;
 	u32 wr_mem_start;
 	u32 wr_mem_continue;
 	bool insert_dcs_command;
-	u32 mdp_transfer_time_us;
 };
 
 /**
@@ -837,7 +889,10 @@ struct dsi_host_config {
  * @phy_timing_len:       Phy timing array length
  * @panel_jitter:         Panel jitter for RSC backoff
  * @panel_prefill_lines:  Panel prefill lines for RSC
+ * @mdp_transfer_time_us:   Specifies the mdp transfer time for command mode
+ *                          panels in microseconds.
  * @clk_rate_hz:          DSI bit clock per lane in hz.
+ * @overlap_pixels:       overlap pixels for certain panels.
  * @topology:             Topology selected for the panel
  * @dsc:                  DSC compression info
  * @dsc_enabled:          DSC compression enabled
@@ -852,7 +907,9 @@ struct dsi_display_mode_priv_info {
 	u32 panel_jitter_numer;
 	u32 panel_jitter_denom;
 	u32 panel_prefill_lines;
+	u32 mdp_transfer_time_us;
 	u64 clk_rate_hz;
+	u32 overlap_pixels;
 
 	struct msm_display_topology topology;
 	struct msm_display_dsc_info dsc;
@@ -924,12 +981,50 @@ struct dsi_event_cb_info {
  * @DSI_FIFO_OVERFLOW:     DSI FIFO Overflow error
  * @DSI_FIFO_UNDERFLOW:    DSI FIFO Underflow error
  * @DSI_LP_Rx_TIMEOUT:     DSI LP/RX Timeout error
+ * @DSI_PLL_UNLOCK_ERR:	   DSI PLL unlock error
  */
 enum dsi_error_status {
 	DSI_FIFO_OVERFLOW = 1,
 	DSI_FIFO_UNDERFLOW,
 	DSI_LP_Rx_TIMEOUT,
+	DSI_PLL_UNLOCK_ERR,
 	DSI_ERR_INTR_ALL,
 };
 
+/* structure containing the delays required for dynamic clk */
+struct dsi_dyn_clk_delay {
+	u32 pipe_delay;
+	u32 pipe_delay2;
+	u32 pll_delay;
+};
+
+/* dynamic refresh control bits */
+enum dsi_dyn_clk_control_bits {
+	DYN_REFRESH_INTF_SEL = 1,
+	DYN_REFRESH_SYNC_MODE,
+	DYN_REFRESH_SW_TRIGGER,
+	DYN_REFRESH_SWI_CTRL,
+};
+
+/* convert dsi pixel format into bits per pixel */
+static inline int dsi_pixel_format_to_bpp(enum dsi_pixel_format fmt)
+{
+	switch (fmt) {
+	case DSI_PIXEL_FORMAT_RGB888:
+	case DSI_PIXEL_FORMAT_MAX:
+		return 24;
+	case DSI_PIXEL_FORMAT_RGB666:
+	case DSI_PIXEL_FORMAT_RGB666_LOOSE:
+		return 18;
+	case DSI_PIXEL_FORMAT_RGB565:
+		return 16;
+	case DSI_PIXEL_FORMAT_RGB111:
+		return 3;
+	case DSI_PIXEL_FORMAT_RGB332:
+		return 8;
+	case DSI_PIXEL_FORMAT_RGB444:
+		return 12;
+	}
+	return 24;
+}
 #endif /* _DSI_DEFS_H_ */

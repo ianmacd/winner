@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -54,6 +54,7 @@
 #define VBUSVLDEXT0				BIT(0)
 
 #define USB2_PHY_USB_PHY_HS_PHY_CTRL2		(0x64)
+#define USB2_AUTO_RESUME			BIT(0)
 #define USB2_SUSPEND_N				BIT(2)
 #define USB2_SUSPEND_N_SEL			BIT(3)
 
@@ -70,8 +71,12 @@
 
 #define TXPREEMPAMPTUNE0(x)			(x << 6)
 #define TXPREEMPAMPTUNE0_MASK			(BIT(7) | BIT(6))
+#define USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X0	0x6c
 #define USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X1	0x70
+#define USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X2	0x74
+#define USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X3	0x78
 #define TXVREFTUNE0_MASK			0xF
+#define PARAM_OVRD_MASK			0xFF
 
 #define USB_HSPHY_3P3_VOL_MIN			3050000 /* uV */
 #define USB_HSPHY_3P3_VOL_MAX			3300000 /* uV */
@@ -82,6 +87,7 @@
 #define USB_HSPHY_1P8_VOL_MAX			1800000 /* uV */
 #define USB_HSPHY_1P8_HPM_LOAD			19000	/* uA */
 
+#define USB_HSPHY_VDD_HPM_LOAD			30000	/* uA */
 #ifdef CONFIG_USB_NOTIFIER
 #define USB2PHY_OVERRIDE_X0				0x6c
 #define USB2PHY_OVERRIDE_X1				0x70
@@ -112,6 +118,7 @@ struct msm_hsphy {
 	bool			suspended;
 	bool			cable_connected;
 	bool			dpdm_enable;
+	bool			no_rext_present;
 
 	int			*param_override_seq;
 	int			param_override_seq_cnt;
@@ -138,6 +145,10 @@ struct msm_hsphy {
 	struct dentry		*root;
 	u8			txvref_tune0;
 	u8			pre_emphasis;
+	u8			param_ovrd0;
+	u8			param_ovrd1;
+	u8			param_ovrd2;
+	u8			param_ovrd3;
 };
 
 #ifdef CONFIG_USB_NOTIFIER
@@ -309,23 +320,6 @@ static void msm_hsphy_enable_clocks(struct msm_hsphy *phy, bool on)
 	}
 
 }
-static int msm_hsphy_config_vdd(struct msm_hsphy *phy, int high)
-{
-	int min, ret;
-
-	min = high ? 1 : 0; /* low or none? */
-	ret = regulator_set_voltage(phy->vdd, phy->vdd_levels[min],
-				    phy->vdd_levels[2]);
-	if (ret) {
-		dev_err(phy->phy.dev, "unable to set voltage for hsusb vdd\n");
-		return ret;
-	}
-
-	dev_dbg(phy->phy.dev, "%s: min_vol:%d max_vol:%d\n", __func__,
-		phy->vdd_levels[min], phy->vdd_levels[2]);
-
-	return ret;
-}
 
 static int msm_hsphy_enable_power(struct msm_hsphy *phy, bool on)
 {
@@ -342,11 +336,17 @@ static int msm_hsphy_enable_power(struct msm_hsphy *phy, bool on)
 	if (!on)
 		goto disable_vdda33;
 
-	ret = msm_hsphy_config_vdd(phy, true);
-	if (ret) {
-		dev_err(phy->phy.dev, "Unable to config VDD:%d\n",
-							ret);
+	ret = regulator_set_load(phy->vdd, USB_HSPHY_VDD_HPM_LOAD);
+	if (ret < 0) {
+		dev_err(phy->phy.dev, "Unable to set HPM of vdd:%d\n", ret);
 		goto err_vdd;
+	}
+
+	ret = regulator_set_voltage(phy->vdd, phy->vdd_levels[1],
+				    phy->vdd_levels[2]);
+	if (ret) {
+		dev_err(phy->phy.dev, "unable to set voltage for hsusb vdd\n");
+		goto put_vdd_lpm;
 	}
 
 	ret = regulator_enable(phy->vdd);
@@ -435,14 +435,18 @@ put_vdda18_lpm:
 disable_vdd:
 	ret = regulator_disable(phy->vdd);
 	if (ret)
-		dev_err(phy->phy.dev, "Unable to disable vdd:%d\n",
-								ret);
+		dev_err(phy->phy.dev, "Unable to disable vdd:%d\n", ret);
 
 unconfig_vdd:
-	ret = msm_hsphy_config_vdd(phy, false);
+	ret = regulator_set_voltage(phy->vdd, phy->vdd_levels[0],
+				    phy->vdd_levels[2]);
 	if (ret)
-		dev_err(phy->phy.dev, "Unable unconfig VDD:%d\n",
-								ret);
+		dev_err(phy->phy.dev, "unable to set voltage for hsusb vdd\n");
+
+put_vdd_lpm:
+	ret = regulator_set_load(phy->vdd, 0);
+	if (ret < 0)
+		dev_err(phy->phy.dev, "Unable to set LPM of vdd\n");
 err_vdd:
 	phy->power_enabled = false;
 	dev_dbg(phy->phy.dev, "HSUSB PHY's regulators are turned OFF.\n");
@@ -594,15 +598,49 @@ static int msm_hsphy_init(struct usb_phy *uphy)
 			TXVREFTUNE0_MASK, val);
 	}
 
+	if (phy->param_ovrd0) {
+		msm_usb_write_readback(phy->base,
+			USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X0,
+			PARAM_OVRD_MASK, phy->param_ovrd0);
+	}
+
+	if (phy->param_ovrd1) {
+		msm_usb_write_readback(phy->base,
+			USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X1,
+			PARAM_OVRD_MASK, phy->param_ovrd1);
+	}
+
+	if (phy->param_ovrd2) {
+		msm_usb_write_readback(phy->base,
+			USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X2,
+			PARAM_OVRD_MASK, phy->param_ovrd2);
+	}
+
+	if (phy->param_ovrd3) {
+		msm_usb_write_readback(phy->base,
+			USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X3,
+			PARAM_OVRD_MASK, phy->param_ovrd3);
+	}
+
+	dev_dbg(uphy->dev, "x0:%08x x1:%08x x2:%08x x3:%08x\n",
+	readl_relaxed(phy->base + USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X0),
+	readl_relaxed(phy->base + USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X1),
+	readl_relaxed(phy->base + USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X2),
+	readl_relaxed(phy->base + USB2PHY_USB_PHY_PARAMETER_OVERRIDE_X3));
+
 	if (phy->phy_rcal_reg) {
 		rcal_code = readl_relaxed(phy->phy_rcal_reg) & phy->rcal_mask;
 
-		dev_dbg(uphy->dev, "rcal_mask:%08x reg:%08x code:%08x\n",
+		dev_dbg(uphy->dev, "rcal_mask:%08x reg:%pK code:%08x\n",
 				phy->rcal_mask, phy->phy_rcal_reg, rcal_code);
 	}
 
-	/* Use external resistor for tuning if efuse is not programmed */
-	if (!rcal_code)
+	/*
+	 * Use external resistor value only if:
+	 * a. It is present and
+	 * b. efuse is not programmed.
+	 */
+	if (!phy->no_rext_present && !rcal_code)
 		msm_usb_write_readback(phy->base, USB2PHY_USB_PHY_RTUNE_SEL,
 			RTUNE_SEL, RTUNE_SEL);
 
@@ -660,8 +698,18 @@ static int msm_hsphy_set_suspend(struct usb_phy *uphy, int suspend)
 	}
 
 	if (suspend) { /* Bus suspend */
-		if (phy->cable_connected ||
-			(phy->phy.flags & PHY_HOST_MODE)) {
+		if (phy->cable_connected) {
+			/* Enable auto-resume functionality by pulsing signal */
+			if (phy->phy.flags & PHY_HOST_MODE) {
+				msm_usb_write_readback(phy->base,
+					USB2_PHY_USB_PHY_HS_PHY_CTRL2,
+					USB2_AUTO_RESUME, USB2_AUTO_RESUME);
+				usleep_range(500, 1000);
+				msm_usb_write_readback(phy->base,
+					USB2_PHY_USB_PHY_HS_PHY_CTRL2,
+					USB2_AUTO_RESUME, 0);
+			}
+
 			msm_hsphy_enable_clocks(phy, false);
 		} else {/* Cable disconnect */
 			mutex_lock(&phy->phy_lock);
@@ -734,6 +782,7 @@ static int msm_hsphy_dpdm_regulator_enable(struct regulator_dev *rdev)
 					UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN,
 					UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN);
 
+		msm_hsphy_enable_clocks(phy, false);
 		phy->dpdm_enable = true;
 	}
 	mutex_unlock(&phy->phy_lock);
@@ -752,7 +801,6 @@ static int msm_hsphy_dpdm_regulator_disable(struct regulator_dev *rdev)
 	mutex_lock(&phy->phy_lock);
 	if (phy->dpdm_enable) {
 		if (!phy->cable_connected) {
-			msm_hsphy_enable_clocks(phy, false);
 			ret = msm_hsphy_enable_power(phy, false);
 			if (ret < 0) {
 				mutex_unlock(&phy->phy_lock);
@@ -815,6 +863,10 @@ static void msm_hsphy_create_debugfs(struct msm_hsphy *phy)
 	phy->root = debugfs_create_dir(dev_name(phy->phy.dev), NULL);
 	debugfs_create_x8("pre_emphasis", 0644, phy->root, &phy->pre_emphasis);
 	debugfs_create_x8("txvref_tune0", 0644, phy->root, &phy->txvref_tune0);
+	debugfs_create_x8("param_ovrd0", 0644, phy->root, &phy->param_ovrd0);
+	debugfs_create_x8("param_ovrd1", 0644, phy->root, &phy->param_ovrd1);
+	debugfs_create_x8("param_ovrd2", 0644, phy->root, &phy->param_ovrd2);
+	debugfs_create_x8("param_ovrd3", 0644, phy->root, &phy->param_ovrd3);
 }
 
 static int msm_hsphy_probe(struct platform_device *pdev)
@@ -861,7 +913,7 @@ static int msm_hsphy_probe(struct platform_device *pdev)
 			dev_err(dev, "unable to read phy rcal mask\n");
 			phy->phy_rcal_reg = NULL;
 		}
-		dev_dbg(dev, "rcal_mask:%08x reg:%08x\n", phy->rcal_mask,
+		dev_dbg(dev, "rcal_mask:%08x reg:%pK\n", phy->rcal_mask,
 				phy->phy_rcal_reg);
 	}
 
@@ -943,6 +995,9 @@ static int msm_hsphy_probe(struct platform_device *pdev)
 			"error allocating memory for emu_dcm_reset_seq\n");
 		}
 	}
+
+	phy->no_rext_present = of_property_read_bool(dev->of_node,
+					"qcom,no-rext-present");
 
 	phy->param_override_seq_cnt = of_property_count_elems_of_size(
 					dev->of_node,

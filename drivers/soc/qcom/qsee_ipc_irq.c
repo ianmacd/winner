@@ -294,7 +294,7 @@ static int qsee_irq_probe(struct platform_device *pdev)
 
 		ret = devm_request_irq(dev, bank->irq, qsee_intr,
 				       IRQF_NO_SUSPEND | IRQF_ONESHOT,
-						"qsee_irq", qirq);
+				       "qsee_irq", qirq);
 		if (ret) {
 			dev_err(dev, "failed to request interrupt\n");
 			return ret;

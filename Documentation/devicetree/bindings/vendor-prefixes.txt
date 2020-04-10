@@ -31,6 +31,7 @@ andestech	Andes Technology Corporation
 android	Google
 apm	Applied Micro Circuits Corporation (APM)
 aptina	Aptina Imaging
+aquantia	Aquantia Corporation
 arasan	Arasan Chip Systems
 arctic	Arctic Sand
 aries	Aries Embedded GmbH
@@ -196,6 +197,7 @@ linux	Linux-specific binding
 lltc	Linear Technology Corporation
 lsi	LSI Corp. (LSI Logic)
 lwn	Liebherr-Werk Nenzing GmbH
+lt	Lontium Semiconductor Corporation
 macnica	Macnica Americas
 marvell	Marvell Technology Group Ltd.
 maxim	Maxim Integrated Products
@@ -276,6 +278,7 @@ qemu	QEMU, a generic and open source machine emulator and virtualizer
 qi	Qi Hardware
 qiaodian	QiaoDian XianShi Corporation
 qnap	QNAP Systems, Inc.
+qvm	BlackBerry Ltd
 radxa	Radxa
 raidsonic	RaidSonic Technology GmbH
 ralink	Mediatek/Ralink Technology Corp.

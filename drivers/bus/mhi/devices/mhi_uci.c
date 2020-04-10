@@ -53,6 +53,7 @@ struct uci_dev {
 	struct uci_chan ul_chan;
 	struct uci_chan dl_chan;
 	size_t mtu;
+	size_t actual_mtu; /* maximum size of incoming buffer */
 	int ref_count;
 	bool enabled;
 	void *ipc_log;
@@ -122,22 +123,24 @@ static int mhi_queue_inbound(struct uci_dev *uci_dev)
 	struct mhi_device *mhi_dev = uci_dev->mhi_dev;
 	int nr_trbs = mhi_get_no_free_descriptors(mhi_dev, DMA_FROM_DEVICE);
 	size_t mtu = uci_dev->mtu;
+	size_t actual_mtu = uci_dev->actual_mtu;
 	void *buf;
 	struct uci_buf *uci_buf;
 	int ret = -EIO, i;
 
 	for (i = 0; i < nr_trbs; i++) {
-		buf = kmalloc(mtu + sizeof(*uci_buf), GFP_KERNEL);
+		buf = kmalloc(mtu, GFP_KERNEL);
 		if (!buf)
 			return -ENOMEM;
 
-		uci_buf = buf + mtu;
+		uci_buf = buf + actual_mtu;
 		uci_buf->data = buf;
 
-		MSG_VERB("Allocated buf %d of %d size %ld\n", i, nr_trbs, mtu);
+		MSG_VERB("Allocated buf %d of %d size %ld\n", i, nr_trbs,
+			 actual_mtu);
 
-		ret = mhi_queue_transfer(mhi_dev, DMA_FROM_DEVICE, buf, mtu,
-					 MHI_EOT);
+		ret = mhi_queue_transfer(mhi_dev, DMA_FROM_DEVICE, buf,
+					 actual_mtu, MHI_EOT);
 		if (ret) {
 			kfree(buf);
 			MSG_ERR("Failed to queue buffer %d\n", i);
@@ -200,9 +203,9 @@ static int mhi_uci_release(struct inode *inode, struct file *file)
 		}
 	}
 
-	mutex_unlock(&uci_dev->mutex);
-
 	MSG_LOG("exit: ref_count:%d\n", uci_dev->ref_count);
+
+	mutex_unlock(&uci_dev->mutex);
 
 	return 0;
 }
@@ -442,8 +445,8 @@ static ssize_t mhi_uci_read(struct file *file,
 
 		if (uci_dev->enabled)
 			ret = mhi_queue_transfer(mhi_dev, DMA_FROM_DEVICE,
-						 uci_buf->data, uci_dev->mtu,
-						 MHI_EOT);
+						 uci_buf->data,
+						 uci_dev->actual_mtu, MHI_EOT);
 		else
 			ret = -ERESTARTSYS;
 
@@ -468,23 +471,22 @@ read_error:
 
 static int mhi_uci_open(struct inode *inode, struct file *filp)
 {
-	struct uci_dev *uci_dev;
+	struct uci_dev *uci_dev = NULL, *tmp_dev;
 	int ret = -EIO;
 	struct uci_buf *buf_itr, *tmp;
 	struct uci_chan *dl_chan;
 
 	mutex_lock(&mhi_uci_drv.lock);
-	list_for_each_entry(uci_dev, &mhi_uci_drv.head, node) {
-		if (uci_dev->devt == inode->i_rdev) {
-			ret = 0;
+	list_for_each_entry(tmp_dev, &mhi_uci_drv.head, node) {
+		if (tmp_dev->devt == inode->i_rdev) {
+			uci_dev = tmp_dev;
 			break;
 		}
 	}
-	mutex_unlock(&mhi_uci_drv.lock);
 
 	/* could not find a minor node */
-	if (ret)
-		return ret;
+	if (!uci_dev)
+		goto error_exit;
 
 	mutex_lock(&uci_dev->mutex);
 	if (!uci_dev->enabled) {
@@ -512,6 +514,7 @@ static int mhi_uci_open(struct inode *inode, struct file *filp)
 
 	filp->private_data = uci_dev;
 	mutex_unlock(&uci_dev->mutex);
+	mutex_unlock(&mhi_uci_drv.lock);
 
 	return 0;
 
@@ -525,6 +528,9 @@ static int mhi_uci_open(struct inode *inode, struct file *filp)
 
  error_open_chan:
 	mutex_unlock(&uci_dev->mutex);
+
+error_exit:
+	mutex_unlock(&mhi_uci_drv.lock);
 
 	return ret;
 }
@@ -544,8 +550,11 @@ static void mhi_uci_remove(struct mhi_device *mhi_dev)
 
 	MSG_LOG("Enter\n");
 
-	/* disable the node */
+
+	mutex_lock(&mhi_uci_drv.lock);
 	mutex_lock(&uci_dev->mutex);
+
+	/* disable the node */
 	spin_lock_irq(&uci_dev->dl_chan.lock);
 	spin_lock_irq(&uci_dev->ul_chan.lock);
 	uci_dev->enabled = false;
@@ -557,9 +566,7 @@ static void mhi_uci_remove(struct mhi_device *mhi_dev)
 	/* delete the node to prevent new opens */
 	device_destroy(mhi_uci_drv.class, uci_dev->devt);
 	uci_dev->dev = NULL;
-	mutex_lock(&mhi_uci_drv.lock);
 	list_del(&uci_dev->node);
-	mutex_unlock(&mhi_uci_drv.lock);
 
 	/* safe to free memory only if all file nodes are closed */
 	if (!uci_dev->ref_count) {
@@ -567,11 +574,14 @@ static void mhi_uci_remove(struct mhi_device *mhi_dev)
 		mutex_destroy(&uci_dev->mutex);
 		clear_bit(MINOR(uci_dev->devt), uci_minors);
 		kfree(uci_dev);
+		mutex_unlock(&mhi_uci_drv.lock);
 		return;
 	}
 
 	MSG_LOG("Exit\n");
 	mutex_unlock(&uci_dev->mutex);
+	mutex_unlock(&mhi_uci_drv.lock);
+
 }
 
 static int mhi_uci_probe(struct mhi_device *mhi_dev,
@@ -623,6 +633,7 @@ static int mhi_uci_probe(struct mhi_device *mhi_dev,
 	};
 
 	uci_dev->mtu = min_t(size_t, id->driver_data, mhi_dev->mtu);
+	uci_dev->actual_mtu = uci_dev->mtu - sizeof(struct uci_buf);
 	mhi_device_set_devdata(mhi_dev, uci_dev);
 	uci_dev->enabled = true;
 
@@ -666,7 +677,7 @@ static void mhi_dl_xfer_cb(struct mhi_device *mhi_dev,
 	}
 
 	spin_lock_irqsave(&uci_chan->lock, flags);
-	buf = mhi_result->buf_addr + uci_dev->mtu;
+	buf = mhi_result->buf_addr + uci_dev->actual_mtu;
 	buf->data = mhi_result->buf_addr;
 	buf->len = mhi_result->bytes_xferd;
 	list_add_tail(&buf->node, &uci_chan->pending);

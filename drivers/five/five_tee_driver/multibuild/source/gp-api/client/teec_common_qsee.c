@@ -118,6 +118,7 @@ TEEC_Result QseeLoadTA(void *ta_session, const TEEC_UUID *uuid)
 {
 	TEEC_Result status = TEEC_SUCCESS;
 	int qsee_res;
+	char ta_name[MAX_QSEE_UUID_LEN] = "five/";
 	char qsee_uuid[MAX_QSEE_UUID_LEN] = {0};
 	QseeSession *qsee_session = (QseeSession *)ta_session;
 
@@ -127,12 +128,17 @@ TEEC_Result QseeLoadTA(void *ta_session, const TEEC_UUID *uuid)
 		goto exit;
 	}
 
+	if (strlcat(ta_name, qsee_uuid, sizeof(ta_name)) >= sizeof(ta_name)) {
+		status = TEEC_ERROR_BAD_PARAMETERS;
+		goto exit;
+	}
+
 	memcpy(&qsee_session->uuid, uuid, sizeof(TEEC_UUID));
 
 	BUILD_BUG_ON((SBUF_LEN + RBUF_LEN) & QSEECOM_ALIGN_MASK);
 
 	qsee_res = qseecom_start_app(&qsee_session->qsee_com_handle,
-				 qsee_uuid,
+				 ta_name,
 				 SBUF_LEN + RBUF_LEN);
 	if (qsee_res != QSEE_SUCCESS) {
 		status = qsee_res == -EINVAL ? TEEC_ERROR_TARGET_DEAD :

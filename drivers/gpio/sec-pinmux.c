@@ -121,26 +121,6 @@ static void msm_check_gpio_status(unsigned char phonestate)
 	pr_info("[dvs_%s]-\n", __func__);
 }
 
-
-static int msm_read_request_gpio(int gpionum)
-{
-        struct gpiomux_setting val;
-        struct gpio_chip *gp = gpio_to_chip(gpionum);
-	int retval;
-
-	pr_info("[dvs_%s]\n", __func__);
-	if(!msm_gpio_is_valid(gpionum)){
-		pr_info("[dvs_%s] gpionum is out of range\n", __func__);
-		return -1;
-	}
-	msm_gp_get_cfg(gp, gpionum, &val);
-
-	retval = msm_gp_get_value(gp, gpionum, val.dir);
-
-	return retval;
-}
-
-
 #ifdef SECGPIO_SLEEP_DEBUGGING
 void setgpio_for_sleepdebug(int gpionum, uint16_t  io_pupd_lh)
 {
@@ -256,7 +236,6 @@ static struct gpio_dvs msm_gpio_dvs = {
 	.count = AP_GPIO_COUNT,
 	.check_init = false,
 	.check_sleep = false,
-	.read_gpio = msm_read_request_gpio,
 #ifdef SECGPIO_SLEEP_DEBUGGING
 	.sdebugtable = &sleepdebug_table,
 	.set_sleepgpio = set_sleepgpio,

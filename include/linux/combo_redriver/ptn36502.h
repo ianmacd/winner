@@ -36,7 +36,7 @@ typedef union{
 
 
 enum config_type {
-	INIT_MODE = 1,
+	INIT_MODE = 0,
 	USB3_ONLY_MODE,
 	DP4_LANE_MODE,
 	DP2_LANE_USB3_MODE,

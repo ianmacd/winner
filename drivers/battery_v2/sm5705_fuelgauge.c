@@ -402,7 +402,11 @@ unsigned int sm5705_get_soc(struct i2c_client *client)
 	ret = sm5705_fg_i2c_read_word(client, SM5705_REG_SOC);
 	if (ret<0) {
 		pr_err("%s: Warning!!!! read soc reg fail\n", __func__);
-		soc = 500;
+		if (fuelgauge->info.batt_soc == 0)
+			soc = 500;
+		else
+			soc = fuelgauge->info.batt_soc; 
+		pr_info("%s : soc=%d\n", __func__, soc);
 	} else {
 		soc = ((ret&0xff00)>>8) * 10; //integer bit;
 		soc = soc + (((ret&0x00ff)*10)/256); // integer + fractional bit
@@ -848,7 +852,7 @@ static bool sm5705_fg_reg_init(struct i2c_client *client, int is_surge)
 	pr_info("%s: LAST PARAM CTRL VALUE = 0x%x : 0x%x\n", __func__, SM5705_REG_PARAM_CTRL, value);
 	// surge reset defence
 	if(is_surge)
-		value = ((fuelgauge->info.batt_ocv<<8)/125);
+		value = ((fuelgauge->info.batt_ocv<<8)/125)+1;
 	else {
 		value = sm5705_calculate_iocv(client);
 		if((fuelgauge->info.volt_cal & 0x0080) == 0x0080)
@@ -1273,6 +1277,8 @@ static int sm5705_get_all_value(struct i2c_client *client)
 static int sm5705_fg_get_jig_mode_real_vbat(struct i2c_client *client)
 {
 	int cntl, ret;
+	int i, j, k, ocv, ocv_data[10];
+	char str[100] = {0,};	
 
 	cntl = sm5705_fg_i2c_read_word(client, SM5705_REG_CNTL);
 	pr_info("%s: start, CNTL=0x%x\n", __func__, cntl);
@@ -1282,8 +1288,33 @@ static int sm5705_fg_get_jig_mode_real_vbat(struct i2c_client *client)
 	cntl = cntl | ENABLE_MODE_nENQ4;
 	sm5705_fg_i2c_write_word(client, SM5705_REG_CNTL, cntl);
 	msleep(300);
-	ret = sm5705_get_vbat(client);
-	pr_info("%s: jig mode real batt V = %d, CNTL=0x%x\n", __func__, ret, cntl);
+
+	// read data
+	for (i=0; i<10; i++) {
+		msleep(150);
+		ocv_data[i] = sm5705_get_vbat(client);
+	}
+
+	// sort
+	for (j = 1; j < 10; j++) {
+		ocv = ocv_data[j];
+		k = j;
+		while (k > 0 && ocv_data[k-1] > ocv) {
+			ocv_data[k] = ocv_data[k-1];
+			k--;
+		}
+		ocv_data[k] = ocv;
+	}
+
+	for (i = 0, ocv = 0; i < 10; i++) {
+		if( i>=2 && i<8) {
+			ocv += ocv_data[i];
+		}
+		sprintf(str+strlen(str), "%d ", ocv_data[i]);
+	}
+	pr_info("%s: jig mode CNTL=0x%x real batt V = %s\n", __func__, cntl, str);
+	ret = ocv / 6;
+
 	cntl = sm5705_fg_i2c_read_word(client, SM5705_REG_CNTL);
 	cntl = cntl & (~ENABLE_MODE_nENQ4);
 	sm5705_fg_i2c_write_word(client, SM5705_REG_CNTL, cntl);
@@ -1466,6 +1497,16 @@ static int sm5705_fg_parse_dt(struct sec_fuelgauge_info *fuelgauge)
 			pr_info("%s reading bat_int_gpio = %d\n", __func__, ret);
 		}
 
+		ret = of_get_named_gpio(np, "fuelgauge,jig_gpio", 0);
+		if (ret > 0) {
+			fuelgauge->jig_gpio = ret;
+			pr_info("%s reading jig_gpio = %d\n", __func__, ret);
+		} else {
+			pr_err("%s error reading jig_gpio = %d\n",
+			       __func__, ret);
+			fuelgauge->jig_gpio = 0;
+		}
+
 		ret = of_property_read_u32(np, "fuelgauge,capacity_max",
 				&fuelgauge->pdata->capacity_max);
 		if (ret < 0)
@@ -1491,6 +1532,13 @@ static int sm5705_fg_parse_dt(struct sec_fuelgauge_info *fuelgauge)
 		if (ret < 0)
 			pr_err("%s error reading capacity_calculation_type %d\n",
 					__func__, ret);
+
+		ret = of_property_read_u32(np, "fuelgauge,capacity",
+				&fuelgauge->capacity);
+		if (ret < 0)
+			pr_err("%s error reading battery capacity %d\n",
+					__func__, ret);
+
 		ret = of_property_read_u32(np, "fuelgauge,fuel_alert_soc",
 				&fuelgauge->pdata->fuel_alert_soc);
 		if (ret < 0)
@@ -2019,6 +2067,7 @@ static int sm5705_fg_get_property(struct power_supply *psy, enum power_supply_pr
 						union power_supply_propval *val)
 {
 	struct sec_fuelgauge_info *fuelgauge = power_supply_get_drvdata(psy);
+	enum power_supply_ext_property ext_psp = (enum power_supply_ext_property) psp;
 
 	switch (psp) {
 	/* Additional Voltage Information (mV) */
@@ -2126,6 +2175,19 @@ static int sm5705_fg_get_property(struct power_supply *psy, enum power_supply_pr
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 	case POWER_SUPPLY_PROP_ENERGY_NOW:
 		return -ENODATA;
+	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
+		val->intval = fuelgauge->capacity * sm5705_get_soc(fuelgauge->client); // uAh
+		break;
+	case POWER_SUPPLY_PROP_MAX ... POWER_SUPPLY_EXT_PROP_MAX:
+		switch (ext_psp) {
+		case POWER_SUPPLY_EXT_PROP_JIG_GPIO:
+			val->intval = gpio_get_value(fuelgauge->jig_gpio);
+			pr_info("%s: jig gpio = %d \n", __func__, val->intval);
+			break;
+		default:
+			return -EINVAL;
+		}
+		break;
 	default:
 		return -EINVAL;
 	}

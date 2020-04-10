@@ -434,6 +434,8 @@
  */
 #define HALO_STREAM_ARB_MSTR_SEL_DEFAULT     0xfc
 
+#define ADSP_COMPR_WAKEUP_TIMEOUT            5000
+
 static const unsigned int halo_mpu_access[18] = {
 	HALO_MPU_WINDOW_ACCESS_0,
 	HALO_MPU_XREG_ACCESS_0,
@@ -631,6 +633,8 @@ struct wm_adsp_compr_buf {
 	const struct wm_adsp_buffer_region_def *region_def;
 
 	char *name;
+
+	struct wakeup_source *ws;
 };
 
 struct wm_adsp_compr {
@@ -1334,7 +1338,7 @@ static int wm_coeff_write_control(struct wm_coeff_ctl *ctl,
 	if (ret)
 		return ret;
 
-	scratch = kmemdup(buf, len, GFP_KERNEL | GFP_DMA);
+	scratch = kmalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
 	if (!scratch)
 		return -ENOMEM;
 
@@ -1348,12 +1352,14 @@ static int wm_coeff_write_control(struct wm_coeff_ctl *ctl,
 		break;
 	}
 
-	temp = scratch;
+	temp = (void *)buf;
 	while (len > 0) {
 		if (len < to_write)
 			to_write = len;
 
-		ret = regmap_raw_write(dsp->regmap, reg, temp, to_write);
+		memcpy(scratch, temp, to_write);
+
+		ret = regmap_raw_write(dsp->regmap, reg, scratch, to_write);
 		if (ret) {
 			adsp_err(dsp, "Failed to write %zu bytes to %x: %d\n",
 				 to_write, reg, ret);
@@ -3967,6 +3973,7 @@ int wm_adsp2_event(struct snd_soc_dapm_widget *w,
 
 		mutex_unlock(&dsp->pwr_lock);
 
+		adsp_dbg(dsp, "Execution started\n");
 		break;
 
 	case SND_SOC_DAPM_PRE_PMD:
@@ -4099,6 +4106,8 @@ int wm_halo_event(struct snd_soc_dapm_widget *w, struct snd_kcontrol *kcontrol,
 		dsp->running = true;
 
 		mutex_unlock(&dsp->pwr_lock);
+
+		adsp_info(dsp, "Execution started\n");
 		break;
 	case SND_SOC_DAPM_PRE_PMD:
 		/* Tell the firmware to cleanup */
@@ -4221,6 +4230,7 @@ static int wm_adsp_of_parse_firmware(struct wm_adsp *dsp,
 	struct device_node *fws = of_get_child_by_name(np, "firmware");
 	struct device_node *fw = NULL;
 	const char **ctl_names;
+	const char *tmp;
 	int ret;
 	int i;
 
@@ -4268,6 +4278,10 @@ static int wm_adsp_of_parse_firmware(struct wm_adsp *dsp,
 
 		dsp->firmwares[i].fullname =
 			of_property_read_bool(fw, "cirrus,full-name");
+
+		ret = of_property_read_string(fw, "cirrus,fw-name", &tmp);
+		if (ret == 0)
+			ctl_names[i] = tmp;
 
 		wm_adsp_of_parse_caps(dsp, fw, &dsp->firmwares[i]);
 
@@ -4903,8 +4917,10 @@ static int wm_adsp_parse_buffer_coeff(struct wm_coeff_ctl *ctl)
 		usleep_range(1000, 2000);
 	}
 
-	if (!val)
+	if (!val) {
+		adsp_err(ctl->dsp, "Failed to acquire host buffer\n");
 		return -EIO;
+	}
 
 	buf = kzalloc(sizeof(*buf), GFP_KERNEL);
 	if (!buf)
@@ -4965,6 +4981,8 @@ static int wm_adsp_parse_buffer_coeff(struct wm_coeff_ctl *ctl)
 	buf->name = kasprintf(GFP_KERNEL, "%s-dsp-%s", ctl->dsp->part,
 			      (char *)&coeff_v1.name);
 
+	buf->ws = wakeup_source_register(buf->name);
+
 	return val;
 }
 
@@ -5017,6 +5035,9 @@ static int wm_adsp_buffer_init(struct wm_adsp *dsp)
 			kfree(buf);
 			return ret;
 		}
+
+		buf->ws = wakeup_source_register("legacy-buffer");
+
 	}
 
 	return 0;
@@ -5032,6 +5053,9 @@ static int wm_adsp_buffer_free(struct wm_adsp *dsp)
 
 		kfree(buf->name);
 		kfree(buf->regions);
+		pm_wakeup_ws_event(buf->ws, 0, false);
+		wakeup_source_unregister(buf->ws);
+
 		list_del(&buf->list);
 		kfree(buf);
 	}
@@ -5081,8 +5105,6 @@ int wm_adsp_compr_trigger(struct snd_compr_stream *stream, int cmd)
 		if (ret < 0)
 			break;
 
-		wm_adsp_buffer_clear(compr->buf);
-
 		/* Trigger the IRQ at one fragment of data */
 		ret = wm_adsp_buffer_write(compr->buf,
 					   HOST_BUFFER_FIELD(high_water_mark),
@@ -5094,6 +5116,8 @@ int wm_adsp_compr_trigger(struct snd_compr_stream *stream, int cmd)
 		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
+		if (wm_adsp_compr_attached(compr))
+			wm_adsp_buffer_clear(compr->buf);
 		break;
 	default:
 		ret = -EINVAL;
@@ -5153,6 +5177,9 @@ static int wm_adsp_buffer_update_avail(struct wm_adsp_compr_buf *buf)
 
 	buf->avail = avail;
 
+	if (avail)
+		pm_wakeup_ws_event(buf->ws, ADSP_COMPR_WAKEUP_TIMEOUT, false);
+
 	return 0;
 }
 
@@ -5191,8 +5218,12 @@ int wm_adsp_compr_handle_irq(struct wm_adsp *dsp)
 		}
 
 		if (dsp->firmwares[dsp->fw].voice_trigger &&
-		    buf->irq_count == 2)
+		    buf->irq_count == 2) {
+			adsp_info(dsp, "Voice trigger on %sattached buffer: %s\n",
+				  compr ? "" : "un",
+				  buf->name ? buf->name : "legacy");
 			ret = WM_ADSP_COMPR_VOICE_TRIGGER;
+		}
 
 out_notify:
 		if (compr && compr->stream)
@@ -5216,6 +5247,8 @@ static int wm_adsp_buffer_reenable_irq(struct wm_adsp_compr_buf *buf)
 
 	buf->irq_count |= 0x01;
 
+	pm_wakeup_ws_event(buf->ws, 0, false);
+
 	return wm_adsp_buffer_write(buf, HOST_BUFFER_FIELD(irq_ack),
 				    buf->irq_count);
 }
@@ -5234,7 +5267,7 @@ int wm_adsp_compr_pointer(struct snd_compr_stream *stream,
 
 	buf = compr->buf;
 
-	if (!compr->buf || compr->buf->error) {
+	if (dsp->fatal_error || !compr->buf || compr->buf->error) {
 		snd_compr_stop_error(stream, SNDRV_PCM_STATE_XRUN);
 		ret = -EIO;
 		goto out;
@@ -5346,7 +5379,7 @@ static int wm_adsp_compr_read(struct wm_adsp_compr *compr,
 
 	adsp_dbg(dsp, "Requested read of %zu bytes\n", count);
 
-	if (!compr->buf || compr->buf->error) {
+	if (dsp->fatal_error || !compr->buf || compr->buf->error) {
 		snd_compr_stop_error(compr->stream, SNDRV_PCM_STATE_XRUN);
 		return -EIO;
 	}
@@ -5564,7 +5597,7 @@ irqreturn_t wm_halo_bus_error(struct wm_adsp *dsp)
 	adsp_warn(dsp, "AHB SYS_ADDR: 0x%x\n", ahb_sts);
 
 	ret = regmap_bulk_read(regmap, dsp->base + HALO_MPU_XM_VIO_ADDR,
-			       fault, sizeof(unsigned int) * 6);
+			       fault, 6);
 	if (ret) {
 		adsp_warn(dsp, "Failed to read MPU fault info (%d)\n", ret);
 		goto exit_free;
@@ -5605,11 +5638,8 @@ irqreturn_t wm_halo_wdt_expire(int irq, void *data)
 	dsp->fatal_error = true;
 
 	list_for_each_entry(compr, &dsp->compr_list, list) {
-		if (compr->stream) {
-			snd_compr_stop_error(compr->stream,
-					     SNDRV_PCM_STATE_XRUN);
+		if (compr->stream)
 			snd_compr_fragment_elapsed(compr->stream);
-		}
 	}
 
 	mutex_unlock(&dsp->pwr_lock);

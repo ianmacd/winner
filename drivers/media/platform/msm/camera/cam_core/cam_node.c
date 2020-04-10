@@ -119,8 +119,8 @@ static int __cam_node_handle_acquire_dev(struct cam_node *node,
 		goto free_ctx;
 	}
 
-	CAM_DBG(CAM_CORE, "[%s] Acquire ctx_id %d",
-		node->name, ctx->ctx_id);
+	CAM_INFO(CAM_CORE, "[%s] Acquire ctx_id %d Acquire dev_handle %d",
+		node->name, ctx->ctx_id, acquire->dev_handle);
 
 	return 0;
 free_ctx:
@@ -350,9 +350,9 @@ destroy_dev_hdl:
 	else
 		ctx->dev_hdl = -1;
 
-	CAM_DBG(CAM_CORE, "[%s] Release ctx_id=%d, refcount=%d",
+	CAM_INFO(CAM_CORE, "[%s] Release ctx_id=%d, release->dev_handle=%d",
 		node->name, ctx->ctx_id,
-		atomic_read(&(ctx->refcount.refcount.refs)));
+		release->dev_handle);
 
 	return rc;
 }

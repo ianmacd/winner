@@ -349,7 +349,7 @@ static ssize_t show_detect_conn_available(struct device *dev,
 
 	return sprintf(buf, "%s\n", available_pins_string);
 }
-static DEVICE_ATTR(available_pins, 0644, show_detect_conn_available, NULL);
+static DEVICE_ATTR(available_pins, 0444, show_detect_conn_available, NULL);
 
 #ifdef CONFIG_OF
 /**
@@ -367,9 +367,10 @@ static int detect_conn_parse_dt(struct device *dev)
 
 	pdata->gpio_cnt = of_gpio_named_count(np, "sec,det_conn_gpios");
 
-	if (pdata->gpio_cnt == 0) {
-		SEC_CONN_PRINT("detect_pinctrl_init failed.\n");
-		return 0;
+	if (pdata->gpio_cnt < 1) {
+		SEC_CONN_PRINT("detect_pinctrl_init failed gpio_cnt < 1 %d.\n", pdata->gpio_cnt);
+		pdata->gpio_cnt = 0;
+		/*return 0;*/
 	}
 
 	pdata->gpio_total_cnt = pdata->gpio_cnt;
@@ -378,7 +379,7 @@ static int detect_conn_parse_dt(struct device *dev)
 	conn_pinctrl = devm_pinctrl_get_select(dev, "det_ap_connect");
 	if (IS_ERR_OR_NULL(conn_pinctrl)) {
 		SEC_CONN_PRINT("detect_pinctrl_init failed.\n");
-		return -EINVAL;
+		/*return -EINVAL;*/
 	}
 
 	for (i = 0; i < pdata->gpio_cnt; i++) {
@@ -402,6 +403,7 @@ static int detect_conn_parse_dt(struct device *dev)
 				gpio_get_value(pdata->irq_gpio[i]));
 			SEC_CONN_PRINT("gpio irq gpio = [%d], irq = [%d]\n", pdata->irq_gpio[i],
 			gpio_to_irq(pdata->irq_gpio[i]));
+			pdata->irq_type[i] = IRQ_TYPE_EDGE_BOTH;
 #endif
 			/*Filling the irq_number from this gpio.*/
 			pdata->irq_number[i] = gpio_to_irq(pdata->irq_gpio[i]);
@@ -413,24 +415,28 @@ static int detect_conn_parse_dt(struct device *dev)
 	}
 
 	/*Get type of gpio irq*/
-	if (of_property_read_u32_array(np, "sec,det_conn_irq_type", pdata->irq_type, pdata->gpio_cnt)) {
-		dev_err(dev, "%s, Failed to get irq_type property.\n", __func__);
-		return -EINVAL;
-	}
+	/*Do not use dtsi temporarily*/
+	/*if (pdata->gpio_cnt > 0) {
+		if (of_property_read_u32_array(np, "sec,det_conn_irq_type", pdata->irq_type, pdata->gpio_cnt)) {
+			dev_err(dev, "%s, Failed to get irq_type property!\n", __func__);
+			return -EINVAL;
+		}
+	}*/
 
 	/* Get pm_gpio */
 	pdata->gpio_pm_cnt = of_gpio_named_count(np, "sec,det_pm_conn_gpios");
 
-	if (pdata->gpio_pm_cnt == 0) {
-		SEC_CONN_PRINT("pm detect_pinctrl_init failed.\n");
-		return 0;
+	if (pdata->gpio_pm_cnt < 1) {
+		SEC_CONN_PRINT("pm detect_pinctrl_init failed pm cnt < 1. %d\n", pdata->gpio_pm_cnt);
+		pdata->gpio_pm_cnt = 0;
+		/*return 0;*/
 	}
 
 	/* Setting pinctrl state to NO PULL */
 	pm_conn_pinctrl = devm_pinctrl_get_select(dev, "det_pm_connect");
 	if (IS_ERR_OR_NULL(pm_conn_pinctrl)) {
 		SEC_CONN_PRINT("pm detect_pinctrl_init failed.\n");
-		return 0;
+		/*return 0;*/
 	}
 
 	pdata->gpio_total_cnt = pdata->gpio_total_cnt + pdata->gpio_pm_cnt;
@@ -487,7 +493,6 @@ static int sec_detect_conn_probe(struct platform_device *pdev)
 #endif
 		if (ret) {
 			dev_err(&pdev->dev, "Failed to parse dt data.\n");
-			kfree(pdata);
 			return ret;
 		}
 
@@ -549,8 +554,6 @@ err_create_detect_conn_sysfs:
 
 out:
 	gpinfo = 0;
-	kfree(pinfo);
-	kfree(pdata);
 
 	return ret;
 }

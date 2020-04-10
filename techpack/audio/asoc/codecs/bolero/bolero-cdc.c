@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -344,6 +344,9 @@ int bolero_register_macro(struct device *dev, u16 macro_id,
 	priv->macro_params[macro_id].dev = dev;
 	priv->current_mclk_mux_macro[macro_id] =
 				bolero_mclk_mux_tbl[macro_id][MCLK_MUX0];
+	if (macro_id == TX_MACRO)
+		priv->macro_params[macro_id].reg_wake_irq = ops->reg_wake_irq;
+
 	priv->num_dais += ops->num_dais;
 	priv->num_macros_registered++;
 	priv->macros_supported[macro_id] = true;
@@ -403,6 +406,9 @@ void bolero_unregister_macro(struct device *dev, u16 macro_id)
 	priv->macro_params[macro_id].mclk_fn = NULL;
 	priv->macro_params[macro_id].event_handler = NULL;
 	priv->macro_params[macro_id].dev = NULL;
+	if (macro_id == TX_MACRO)
+		priv->macro_params[macro_id].reg_wake_irq = NULL;
+
 	priv->num_dais -= priv->macro_params[macro_id].num_dais;
 	priv->num_macros_registered--;
 
@@ -444,14 +450,16 @@ int bolero_request_clock(struct device *dev, u16 macro_id,
 		dev_err(dev, "%s: priv is null or invalid macro\n", __func__);
 		return -EINVAL;
 	}
-	mclk_mux0_macro =  bolero_mclk_mux_tbl[macro_id][MCLK_MUX0];
+
 	mutex_lock(&priv->clk_lock);
+
+	mclk_mux0_macro =  bolero_mclk_mux_tbl[macro_id][MCLK_MUX0];
 	switch (mclk_mux_id) {
 	case MCLK_MUX0:
 		ret = priv->macro_params[mclk_mux0_macro].mclk_fn(
 			priv->macro_params[mclk_mux0_macro].dev, enable);
 		if (ret < 0) {
-			dev_err(dev,
+			dev_err_ratelimited(dev,
 				"%s: MCLK_MUX0 %s failed for macro:%d, mclk_mux0_macro:%d\n",
 				__func__,
 				enable ? "enable" : "disable",
@@ -465,7 +473,7 @@ int bolero_request_clock(struct device *dev, u16 macro_id,
 			priv->macro_params[mclk_mux0_macro].dev,
 			true);
 		if (ret < 0) {
-			dev_err(dev,
+			dev_err_ratelimited(dev,
 				"%s: MCLK_MUX0 en failed for macro:%d mclk_mux0_macro:%d\n",
 				__func__, macro_id, mclk_mux0_macro);
 			/*
@@ -482,7 +490,7 @@ int bolero_request_clock(struct device *dev, u16 macro_id,
 		ret1 = priv->macro_params[mclk_mux1_macro].mclk_fn(
 			priv->macro_params[mclk_mux1_macro].dev, enable);
 		if (ret1 < 0)
-			dev_err(dev,
+			dev_err_ratelimited(dev,
 				"%s: MCLK_MUX1 %s failed for macro:%d, mclk_mux1_macro:%d\n",
 				__func__,
 				enable ? "enable" : "disable",
@@ -513,6 +521,29 @@ err:
 	return ret;
 }
 EXPORT_SYMBOL(bolero_request_clock);
+
+void bolero_wsa_pa_on(struct device *dev)
+{
+	struct bolero_priv *priv;
+
+	if (!dev) {
+		pr_err("%s: dev is null\n", __func__);
+		return;
+	}
+	if (!bolero_is_valid_macro_dev(dev)) {
+		dev_err(dev, "%s: not a valid child dev\n",
+			__func__);
+		return;
+	}
+	priv = dev_get_drvdata(dev->parent);
+	if (!priv) {
+		dev_err(dev, "%s: priv is null\n", __func__);
+		return;
+	}
+
+	bolero_cdc_notifier_call(priv, BOLERO_WCD_EVT_PA_ON_POST_FSCLK);
+}
+EXPORT_SYMBOL(bolero_wsa_pa_on);
 
 static ssize_t bolero_version_read(struct snd_info_entry *entry,
 				   void *file_private_data,
@@ -561,6 +592,13 @@ static int bolero_ssr_enable(struct device *dev, void *data)
 		priv->macro_params[VA_MACRO].event_handler(priv->codec,
 			BOLERO_MACRO_EVT_WAIT_VA_CLK_RESET, 0x0);
 
+	/* reset clock to force enable any clock disabled in ssr */
+	for (macro_idx = START_MACRO; macro_idx < MAX_MACRO; macro_idx++) {
+		if (!priv->macro_params[macro_idx].event_handler)
+			continue;
+		priv->macro_params[macro_idx].event_handler(priv->codec,
+			BOLERO_MACRO_EVT_CLK_RESET, 0x0);
+	}
 	regcache_cache_only(priv->regmap, false);
 	/* call ssr event for supported macros */
 	for (macro_idx = START_MACRO; macro_idx < MAX_MACRO; macro_idx++) {
@@ -581,6 +619,7 @@ static void bolero_ssr_disable(struct device *dev, void *data)
 	struct bolero_priv *priv = data;
 	int macro_idx;
 
+	bolero_cdc_notifier_call(priv, BOLERO_WCD_EVT_PA_OFF_PRE_SSR);
 	regcache_cache_only(priv->regmap, true);
 
 	mutex_lock(&priv->clk_lock);
@@ -662,6 +701,37 @@ int bolero_info_create_codec_entry(struct snd_info_entry *codec_root,
 	return 0;
 }
 EXPORT_SYMBOL(bolero_info_create_codec_entry);
+
+/**
+ * bolero_register_wake_irq - Register wake irq of Tx macro
+ *
+ * @codec: codec ptr.
+ * @ipc_wakeup: bool to identify ipc_wakeup to be used or HW interrupt line.
+ *
+ * Return: 0 on success or negative error code on failure.
+ */
+int bolero_register_wake_irq(struct snd_soc_codec *codec, u32 ipc_wakeup)
+{
+	struct bolero_priv *priv = NULL;
+
+	if (!codec)
+		return -EINVAL;
+
+	priv = snd_soc_codec_get_drvdata(codec);
+	if (!priv)
+		return -EINVAL;
+
+	if (!bolero_is_valid_codec_dev(priv->dev)) {
+		dev_err(codec->dev, "%s: invalid codec\n", __func__);
+		return -EINVAL;
+	}
+
+	if (priv->macro_params[TX_MACRO].reg_wake_irq)
+		priv->macro_params[TX_MACRO].reg_wake_irq(codec, ipc_wakeup);
+
+	return 0;
+}
+EXPORT_SYMBOL(bolero_register_wake_irq);
 
 static int bolero_soc_codec_probe(struct snd_soc_codec *codec)
 {
@@ -813,6 +883,9 @@ static int bolero_probe(struct platform_device *pdev)
 	struct bolero_priv *priv;
 	u32 num_macros = 0;
 	int ret;
+	u32 slew_reg1 = 0, slew_reg2 = 0;
+	u32 slew_val1 = 0, slew_val2 = 0;
+	char __iomem *slew_io_base1 = NULL, *slew_io_base2 = NULL;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(struct bolero_priv),
 			    GFP_KERNEL);
@@ -857,6 +930,38 @@ static int bolero_probe(struct platform_device *pdev)
 	dev_set_drvdata(&pdev->dev, priv);
 	mutex_init(&priv->io_lock);
 	mutex_init(&priv->clk_lock);
+
+	ret = of_property_read_u32(pdev->dev.of_node, "slew_rate_reg1",
+				   &slew_reg1);
+
+	ret |= of_property_read_u32(pdev->dev.of_node, "slew_rate_val1",
+				   &slew_val1);
+	if (!ret) {
+		slew_io_base1 = devm_ioremap(&pdev->dev, slew_reg1, 0x4);
+		if (!slew_io_base1) {
+			dev_err(&pdev->dev, "%s: ioremap failed for slew reg 1\n",
+				__func__);
+			return -ENOMEM;
+		}
+		/* update slew rate for tx/rx swr interface */
+		iowrite32(slew_val1, slew_io_base1);
+	}
+	ret = of_property_read_u32(pdev->dev.of_node, "slew_rate_reg2",
+				   &slew_reg2);
+
+	ret |= of_property_read_u32(pdev->dev.of_node, "slew_rate_val2",
+				   &slew_val2);
+
+	if (!ret) {
+		slew_io_base2 = devm_ioremap(&pdev->dev, slew_reg2, 0x4);
+		if (!slew_io_base2) {
+			dev_err(&pdev->dev, "%s: ioremap failed for slew reg 2\n",
+				__func__);
+			return -ENOMEM;
+		}
+		/* update slew rate for tx/rx swr interface */
+		iowrite32(slew_val2, slew_io_base2);
+	}
 	INIT_WORK(&priv->bolero_add_child_devices_work,
 		  bolero_add_child_devices);
 	schedule_work(&priv->bolero_add_child_devices_work);

@@ -50,8 +50,8 @@
 #include "ufs-debugfs.h"
 #include "ufs-qcom.h"
 
-#if defined(CONFIG_USER_RESET_DEBUG)
-#include "linux/sec_debug_user_reset.h"
+#if defined(CONFIG_SEC_DEBUG)
+#include "linux/sec_debug.h"
 #endif
 
 #if defined(CONFIG_SEC_ABC)
@@ -268,6 +268,35 @@ static void ufshcd_update_uic_error_cnt(struct ufs_hba *hba, u32 reg, int type)
 /* IOCTL opcode for command - ufs set device read only */
 #define UFS_IOCTL_BLKROSET      BLKROSET
 
+#ifdef CONFIG_SCSI_UFS_SUPPORT_TW_MAN_GC
+#define UFS_TW_MANUAL_FLUSH_THRESHOLD   5
+#endif
+#define UFS_TW_DISABLE_THRESHOLD	7
+
+#ifdef CONFIG_BLK_TURBO_WRITE
+#define SEC_UFS_TW_INFO_DIFF(t, n, o, member) ({		\
+		(t)->member = (n)->member - (o)->member;	\
+		(o)->member = (n)->member; })
+
+static void SEC_UFS_TW_info_get_diff(struct SEC_UFS_TW_info *target,
+		struct SEC_UFS_TW_info *new, struct SEC_UFS_TW_info *old)
+{
+		SEC_UFS_TW_INFO_DIFF(target, new, old, tw_enable_count);
+		SEC_UFS_TW_INFO_DIFF(target, new, old, tw_disable_count);
+		SEC_UFS_TW_INFO_DIFF(target, new, old, tw_amount_W_kb);
+		SEC_UFS_TW_INFO_DIFF(target, new, old, hibern8_enter_count);
+		SEC_UFS_TW_INFO_DIFF(target, new, old, hibern8_enter_count_100ms);
+		SEC_UFS_TW_INFO_DIFF(target, new, old, hibern8_amount_ms);
+		SEC_UFS_TW_INFO_DIFF(target, new, old, hibern8_amount_ms_100ms);
+
+		target->hibern8_max_ms = new->hibern8_max_ms;
+
+		// initialize min, max h8 time values.
+		new->hibern8_max_ms = 0;
+		get_monotonic_boottime(&(old->timestamp));	/* update timestamp */
+}
+#endif
+
 #define ufshcd_toggle_vreg(_dev, _vreg, _on)				\
 	({                                                              \
 		int _ret;                                               \
@@ -450,6 +479,7 @@ static struct ufs_dev_fix ufs_fixups[] = {
 		UFS_DEVICE_NO_FASTAUTO),
 	UFS_FIX(UFS_VENDOR_SAMSUNG, UFS_ANY_MODEL,
 		UFS_DEVICE_QUIRK_HOST_PA_TACTIVATE),
+	UFS_FIX(UFS_VENDOR_SAMSUNG, UFS_ANY_MODEL, UFS_DEVICE_NO_VCCQ),
 	UFS_FIX(UFS_VENDOR_TOSHIBA, UFS_ANY_MODEL,
 		UFS_DEVICE_QUIRK_DELAY_BEFORE_LPM),
 	UFS_FIX(UFS_VENDOR_TOSHIBA, UFS_ANY_MODEL,
@@ -463,6 +493,8 @@ static struct ufs_dev_fix ufs_fixups[] = {
 	UFS_FIX(UFS_VENDOR_SKHYNIX, UFS_ANY_MODEL, UFS_DEVICE_NO_VCCQ),
 	UFS_FIX(UFS_VENDOR_SKHYNIX, UFS_ANY_MODEL,
 		UFS_DEVICE_QUIRK_HOST_PA_SAVECONFIGTIME),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, UFS_ANY_MODEL,
+		UFS_DEVICE_QUIRK_WAIT_AFTER_REF_CLK_UNGATE),
 	UFS_FIX(UFS_VENDOR_SKHYNIX, "hB8aL1",
 		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
 	UFS_FIX(UFS_VENDOR_SKHYNIX, "hC8aL1",
@@ -513,12 +545,11 @@ static int ufshcd_devfreq_get_dev_status(struct device *dev,
 		struct devfreq_dev_status *stat);
 static void __ufshcd_shutdown_clkscaling(struct ufs_hba *hba);
 static int ufshcd_set_dev_pwr_mode(struct ufs_hba *hba,
-		enum ufs_dev_pwr_mode pwr_mode);
+				     enum ufs_dev_pwr_mode pwr_mode);
 static int ufshcd_config_vreg(struct device *dev,
 		struct ufs_vreg *vreg, bool on);
 static int ufshcd_enable_vreg(struct device *dev, struct ufs_vreg *vreg);
 static int ufshcd_disable_vreg(struct device *dev, struct ufs_vreg *vreg);
-static bool ufshcd_is_g4_supported(struct ufs_hba *hba);
 
 #if defined(SEC_UFS_ERROR_COUNT)
 #include <scsi/scsi_proto.h>
@@ -799,6 +830,103 @@ static void SEC_ufs_query_error_check(struct ufs_hba *hba, enum dev_cmd_type cmd
 
 }
 #endif	// SEC_UFS_ERROR_COUNT
+
+static void SEC_ufs_update_tw_info(struct ufs_hba *hba, int write_transfer_len)
+{
+	struct SEC_UFS_TW_info *tw_info = &(hba->SEC_tw_info);
+	enum ufs_tw_state tw_state = hba->ufs_tw_state;
+
+	if (tw_info->tw_info_disable)
+		return;
+
+	if (write_transfer_len) {
+		/*
+		 * write_transfer_len : Byte
+		 * tw_info->tw_amount_W_kb : KB
+		 */
+		tw_info->tw_amount_W_kb += (unsigned long)(write_transfer_len >> 10);
+		if (unlikely((s64)tw_info->tw_amount_W_kb < 0))
+			goto disable_tw_info;
+		return;
+	}
+
+	switch (tw_state) {
+	case UFS_TW_OFF_STATE:
+		tw_info->tw_enable_ms += jiffies_to_msecs(jiffies - tw_info->tw_state_ts);
+		tw_info->tw_state_ts = jiffies;
+		tw_info->tw_disable_count++;
+		if (unlikely(((s64)tw_info->tw_enable_ms < 0) || ((s64)tw_info->tw_disable_count < 0)))
+			goto disable_tw_info;
+		break;
+	case UFS_TW_ON_STATE:
+		tw_info->tw_disable_ms += jiffies_to_msecs(jiffies - tw_info->tw_state_ts);
+		tw_info->tw_state_ts = jiffies;
+		tw_info->tw_enable_count++;
+		if (unlikely(((s64)tw_info->tw_disable_ms < 0) || ((s64)tw_info->tw_enable_count < 0)))
+			goto disable_tw_info;
+		break;
+	case UFS_TW_ERR_STATE:
+		tw_info->tw_setflag_error_count++; 
+		if (unlikely((s64)tw_info->tw_setflag_error_count < 0)) 
+			goto disable_tw_info; 
+		break; 
+	default:
+		break;
+	}
+	return;
+
+disable_tw_info:
+	/* disable tw_info updating when MSB is set */
+	tw_info->tw_info_disable = true;
+	return;
+}
+
+static void SEC_ufs_update_h8_info(struct ufs_hba *hba, bool hibern8_enter)
+{
+	struct SEC_UFS_TW_info *tw_info = &(hba->SEC_tw_info);
+	u64 calc_h8_time_ms = 0;
+
+	/*
+	 * I/O end in UFS_ACTIVE_PWR_MODE :
+	 *   -> 10ms : Auto-H8
+	 *   -> 30~50ms : call hibern8_enter in clk gating
+	 *   -> 3s : runtime PM suspend
+	 *      -> ufshcd_suspend : run H8 exit ->  SSU : UFS_SLEEP_PWR_MODE -> H8 enter
+	 * runtime PM resume : H8 exit -> SSU : UFS_ACTIVE_PWR_MODE -> I/O
+	 *
+	 * system PM suspend :
+	 *   if runtime suspended -> runtime PM resume
+	 *   ufshcd_suspend : run H8 exit(if h8 state)
+	 *      ->  SSU : UFS_SLEEP_PWR_MODE -> H8 enter
+	 */
+	if (!ufshcd_is_ufs_dev_active(hba))
+		return;
+
+	if (unlikely(((s64)tw_info->hibern8_enter_count < 0) || ((s64)tw_info->hibern8_amount_ms < 0)))
+		return;
+
+	if (hibern8_enter) {
+		tw_info->hibern8_enter_ts = ktime_get();
+	} else {
+		calc_h8_time_ms = (u64)ktime_ms_delta(ktime_get(), tw_info->hibern8_enter_ts);
+#if defined(CONFIG_SCSI_UFS_QCOM)
+		if (ufshcd_is_auto_hibern8_supported(hba)) {
+			calc_h8_time_ms += (u64)(hba->clk_gating.delay_ms - hba->hibern8_on_idle.delay_ms);
+		}
+#endif
+
+		if (calc_h8_time_ms > 99) {
+			tw_info->hibern8_enter_count_100ms++;
+			tw_info->hibern8_amount_ms_100ms += calc_h8_time_ms;
+		}
+
+		if (tw_info->hibern8_max_ms < calc_h8_time_ms)
+			tw_info->hibern8_max_ms = calc_h8_time_ms;
+
+		tw_info->hibern8_amount_ms += calc_h8_time_ms;
+		tw_info->hibern8_enter_count++;
+	}
+}
 
 #if IS_ENABLED(CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND)
 static struct devfreq_simple_ondemand_data ufshcd_ondemand_data = {
@@ -1141,7 +1269,8 @@ static inline void ufshcd_cond_add_cmd_trace(struct ufs_hba *hba,
 		}
 	}
 
-	if (lrbp->cmd && (lrbp->command_type == UTP_CMD_TYPE_SCSI)) {
+	if (lrbp->cmd && ((lrbp->command_type == UTP_CMD_TYPE_SCSI) ||
+			  (lrbp->command_type == UTP_CMD_TYPE_UFS_STORAGE))) {
 		cmd_type = "scsi";
 		cmd_id = (u8)(*lrbp->cmd->cmnd);
 	} else if (lrbp->command_type == UTP_CMD_TYPE_DEV_MANAGE) {
@@ -2199,8 +2328,7 @@ static int ufshcd_devfreq_scale(struct ufs_hba *hba, bool scale_up)
 	    hba->hibern8_on_idle.is_enabled) {
 		ret = ufshcd_uic_hibern8_enter(hba);
 		if (ret)
-			/* link will be bad state so no need to scale_up_gear */
-			return ret;
+			goto scale_up_gear;
 		ufshcd_custom_cmd_log(hba, "Hibern8-entered");
 	}
 
@@ -2213,8 +2341,7 @@ static int ufshcd_devfreq_scale(struct ufs_hba *hba, bool scale_up)
 	    hba->hibern8_on_idle.is_enabled) {
 		ret = ufshcd_uic_hibern8_exit(hba);
 		if (ret)
-			/* link will be bad state so no need to scale_up_gear */
-			return ret;
+			goto scale_up_gear;
 		ufshcd_custom_cmd_log(hba, "Hibern8-Exited");
 	}
 
@@ -2567,6 +2694,12 @@ start:
 		 */
 		if (ufshcd_can_hibern8_during_gating(hba) &&
 		    ufshcd_is_link_hibern8(hba)) {
+			if (async) {
+				rc = -EAGAIN;
+				hba->clk_gating.active_reqs--;
+				break;
+			}
+
 			spin_unlock_irqrestore(hba->host->host_lock, flags);
 			flush_work(&hba->clk_gating.ungate_work);
 			spin_lock_irqsave(hba->host->host_lock, flags);
@@ -3995,10 +4128,11 @@ static int ufshcd_comp_devman_upiu(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
 	u32 upiu_flags;
 	int ret = 0;
 
-	if (hba->ufs_version == UFSHCI_VERSION_20)
-		lrbp->command_type = UTP_CMD_TYPE_UFS_STORAGE;
-	else
+	if ((hba->ufs_version == UFSHCI_VERSION_10) ||
+	    (hba->ufs_version == UFSHCI_VERSION_11))
 		lrbp->command_type = UTP_CMD_TYPE_DEV_MANAGE;
+	else
+		lrbp->command_type = UTP_CMD_TYPE_UFS_STORAGE;
 
 	ret = ufshcd_prepare_req_desc_hdr(hba, lrbp, &upiu_flags,
 			DMA_NONE);
@@ -4023,10 +4157,11 @@ static int ufshcd_comp_scsi_upiu(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
 	u32 upiu_flags;
 	int ret = 0;
 
-	if (hba->ufs_version == UFSHCI_VERSION_20)
-		lrbp->command_type = UTP_CMD_TYPE_UFS_STORAGE;
-	else
+	if ((hba->ufs_version == UFSHCI_VERSION_10) ||
+	    (hba->ufs_version == UFSHCI_VERSION_11))
 		lrbp->command_type = UTP_CMD_TYPE_SCSI;
+	else
+		lrbp->command_type = UTP_CMD_TYPE_UFS_STORAGE;
 
 	if (likely(lrbp->cmd)) {
 		ret = ufshcd_prepare_req_desc_hdr(hba, lrbp,
@@ -4271,8 +4406,8 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 	if (err) {
 		if (err != -EAGAIN)
 			dev_err(hba->dev,
-				"%s: failed to compose upiu %d\n",
-				__func__, err);
+				"%s: failed to compose upiu %d cmd:0x%08x lun:%d\n",
+				__func__, err, cmd, lrbp->lun);
 
 		lrbp->cmd = NULL;
 		clear_bit_unlock(tag, &hba->lrb_in_use);
@@ -4463,7 +4598,7 @@ static int ufshcd_wait_for_dev_cmd(struct ufs_hba *hba,
 		ufshcd_outstanding_req_clear(hba, lrbp->task_tag);
 	}
 
-	if (err)
+	if (err && err != -EAGAIN)
 		ufsdbg_set_err_state(hba);
 
 	return err;
@@ -4526,15 +4661,6 @@ static int ufshcd_exec_dev_cmd(struct ufs_hba *hba,
 	unsigned long flags;
 
 	/*
-	 * May get invoked from shutdown and IOCTL contexts.
-	 * In shutdown context, it comes in with lock acquired.
-	 * In error recovery context, it may come with lock acquired.
-	 */
-
-	if (!ufshcd_is_shutdown_ongoing(hba) && !ufshcd_eh_in_progress(hba))
-		down_read(&hba->lock);
-
-	/*
 	 * Get free slot, sleep if slots are unavailable.
 	 * Even though we use wait_event() which sleeps indefinitely,
 	 * the maximum wait time is bounded by SCSI request timeout.
@@ -4566,8 +4692,6 @@ static int ufshcd_exec_dev_cmd(struct ufs_hba *hba,
 out_put_tag:
 	ufshcd_put_dev_cmd_tag(hba, tag);
 	wake_up(&hba->dev_cmd.tag_wq);
-	if (!ufshcd_is_shutdown_ongoing(hba) && !ufshcd_eh_in_progress(hba))
-		up_read(&hba->lock);
 #if defined(SEC_UFS_ERROR_COUNT)
 	if (err && (cmd_type != DEV_CMD_TYPE_NOP))
 		SEC_ufs_query_error_check(hba, cmd_type);
@@ -4646,10 +4770,15 @@ int ufshcd_query_flag(struct ufs_hba *hba, enum query_opcode opcode,
 	struct ufs_query_res *response = NULL;
 	int err, index = 0, selector = 0;
 	int timeout = QUERY_REQ_TIMEOUT;
+	bool has_read_lock = false;
 
 	BUG_ON(!hba);
 
 	ufshcd_hold_all(hba);
+	if (!ufshcd_is_shutdown_ongoing(hba) && !ufshcd_eh_in_progress(hba)) {
+		down_read(&hba->lock);
+		has_read_lock = true;
+	}
 	mutex_lock(&hba->dev_cmd.lock);
 	ufshcd_init_query(hba, &request, &response, opcode, idn, index,
 			selector);
@@ -4693,6 +4822,8 @@ int ufshcd_query_flag(struct ufs_hba *hba, enum query_opcode opcode,
 
 out_unlock:
 	mutex_unlock(&hba->dev_cmd.lock);
+	if (has_read_lock)
+		up_read(&hba->lock);
 	ufshcd_release_all(hba);
 	return err;
 }
@@ -4714,6 +4845,7 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
 	struct ufs_query_req *request = NULL;
 	struct ufs_query_res *response = NULL;
 	int err;
+	bool has_read_lock = false;
 
 	BUG_ON(!hba);
 
@@ -4725,6 +4857,15 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
 		goto out;
 	}
 
+	/*
+	 * May get invoked from shutdown and IOCTL contexts.
+	 * In shutdown context, it comes in with lock acquired.
+	 * In error recovery context, it may come with lock acquired.
+	 */
+	if (!ufshcd_is_shutdown_ongoing(hba) && !ufshcd_eh_in_progress(hba)) {
+		down_read(&hba->lock);
+		has_read_lock = true;
+	}
 	mutex_lock(&hba->dev_cmd.lock);
 	ufshcd_init_query(hba, &request, &response, opcode, idn, index,
 			selector);
@@ -4757,6 +4898,8 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
 
 out_unlock:
 	mutex_unlock(&hba->dev_cmd.lock);
+	if (has_read_lock)
+		up_read(&hba->lock);
 out:
 	ufshcd_release_all(hba);
 	return err;
@@ -4806,6 +4949,7 @@ static int __ufshcd_query_descriptor(struct ufs_hba *hba,
 	struct ufs_query_req *request = NULL;
 	struct ufs_query_res *response = NULL;
 	int err;
+	bool has_read_lock = false;
 
 	BUG_ON(!hba);
 
@@ -4824,6 +4968,10 @@ static int __ufshcd_query_descriptor(struct ufs_hba *hba,
 		goto out;
 	}
 
+	if (!ufshcd_is_shutdown_ongoing(hba) && !ufshcd_eh_in_progress(hba)) {
+		down_read(&hba->lock);
+		has_read_lock = true;
+	}
 	mutex_lock(&hba->dev_cmd.lock);
 	ufshcd_init_query(hba, &request, &response, opcode, idn, index,
 			selector);
@@ -4859,6 +5007,8 @@ static int __ufshcd_query_descriptor(struct ufs_hba *hba,
 
 out_unlock:
 	mutex_unlock(&hba->dev_cmd.lock);
+	if (has_read_lock)
+		up_read(&hba->lock);
 out:
 	ufshcd_release_all(hba);
 	return err;
@@ -5298,6 +5448,201 @@ static int UFS_Toshiba_K2_query_fatal_mode(struct ufs_hba *hba)
 	return result;
 }
 
+/* call back for block layer */
+void ufshcd_tw_ctrl(struct scsi_device *sdev, int en)
+{
+	int err;
+	struct ufs_hba *hba;
+	bool has_lock = false;
+
+	hba = shost_priv(sdev->host);
+
+	mutex_lock(&hba->tw_ctrl_mutex);
+	has_lock = true;
+
+	pr_err("UFS: try TW %s.\n", en ? "On" : "Off");
+
+	if (!hba->support_tw)
+		goto out;
+
+	if (hba->pm_op_in_progress) {
+		dev_err(hba->dev, "%s: tw ctrl during pm operation is not allowed.\n",
+				__func__);
+		goto out;
+	}
+
+	if (hba->ufshcd_state != UFSHCD_STATE_OPERATIONAL) {
+		dev_err(hba->dev, "%s: ufs host is not available.\n",
+				__func__);
+		goto out;
+	}
+
+	if (hba->tw_state_not_allowed) {
+		dev_err(hba->dev, "%s: tw ctrl is not allowed(e.g. ufs driver is suspended).\n",
+				__func__);
+		goto out;
+	}
+
+	if (ufshcd_is_tw_err(hba))
+		dev_err(hba->dev, "%s: previous turbo write control was failed.\n",
+				__func__);
+
+	if (en) {
+		if (ufshcd_is_tw_on(hba)) {
+			dev_err(hba->dev, "%s: turbo write already enabled. tw_state = %d\n",
+					__func__, hba->ufs_tw_state);
+			goto out;
+		}
+		pm_runtime_get_sync(hba->dev);
+		if (hba->tw_state_not_allowed) {	// check again
+			dev_err(hba->dev, "%s: tw ctrl %s is not allowed(e.g. ufs driver is suspended)\n",
+					__func__, en ? "On" : "Off");
+			goto out_rpm_put;
+		}
+
+		err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_SET_FLAG,
+				QUERY_FLAG_IDN_TW_EN, NULL);
+		if (err) {
+			ufshcd_set_tw_err(hba);
+			dev_err(hba->dev, "%s: enable turbo write failed. err = %d\n",
+					__func__, err);
+		} else {
+			ufshcd_set_tw_on(hba);
+			dev_info(hba->dev, "%s: ufs turbo write enabled \n", __func__);
+		}
+	} else {
+		if (ufshcd_is_tw_off(hba)) {
+			dev_err(hba->dev, "%s: turbo write already disabled. tw_state = %d\n",
+					__func__, hba->ufs_tw_state);
+			goto out;
+		}
+		pm_runtime_get_sync(hba->dev);
+		if (hba->tw_state_not_allowed) {	// check again
+			dev_err(hba->dev, "%s: tw ctrl %s is not allowed(e.g. ufs driver is suspended)\n",
+					__func__, en ? "On" : "Off");
+			goto out_rpm_put;
+		}
+
+		err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_CLEAR_FLAG,
+				QUERY_FLAG_IDN_TW_EN, NULL);
+		if (err) {
+			ufshcd_set_tw_err(hba);
+			dev_err(hba->dev, "%s: disable turbo write failed. err = %d\n",
+					__func__, err);
+		} else {
+			ufshcd_set_tw_off(hba);
+			dev_info(hba->dev, "%s: ufs turbo write disabled \n", __func__);
+		}
+	}
+	SEC_ufs_update_tw_info(hba, 0);
+out_rpm_put:
+	/*
+	 * tw_ctrl_mutex must be unlocked before the pm_runtime_put_sync() is called
+	 * to prevent deadlock issue.
+	 *
+	 * ufshcd_suspend() calls mutex_lock(&hba->tw_ctrl_mutex)
+	 */
+	mutex_unlock(&hba->tw_ctrl_mutex);
+	has_lock = false;
+	pm_runtime_put_sync(hba->dev);
+out:
+	if (has_lock)
+		mutex_unlock(&hba->tw_ctrl_mutex);
+}
+
+static void ufshcd_reset_tw(struct ufs_hba *hba, bool force)
+{
+	int err = 0;
+
+	if (!hba->support_tw)
+		return;
+
+	if (ufshcd_is_tw_off(hba)) {
+		dev_info(hba->dev, "%s: turbo write already disabled. tw_state = %d\n",
+				__func__, hba->ufs_tw_state);
+		return;
+	}
+
+	if (ufshcd_is_tw_err(hba))
+		dev_err(hba->dev, "%s: previous turbo write control was failed.\n",
+				__func__);
+
+	if (force)
+		err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_CLEAR_FLAG,
+				QUERY_FLAG_IDN_TW_EN, NULL);
+
+	if (err) {
+		ufshcd_set_tw_err(hba);
+		dev_err(hba->dev, "%s: disable turbo write failed. err = %d\n",
+				__func__, err);
+	} else {
+		ufshcd_set_tw_off(hba);
+		dev_info(hba->dev, "%s: ufs turbo write disabled \n", __func__);
+	}
+
+	SEC_ufs_update_tw_info(hba, 0);
+#ifdef CONFIG_BLK_TURBO_WRITE
+	scsi_reset_tw_state(hba->host);
+#endif
+}
+
+#ifdef CONFIG_SCSI_UFS_SUPPORT_TW_MAN_GC
+static int ufshcd_get_tw_buf_status(struct ufs_hba *hba, u32 *status)
+{
+	return ufshcd_query_attr_retry(hba, UPIU_QUERY_OPCODE_READ_ATTR,
+			QUERY_ATTR_IDN_AVL_TW_BUF_SIZE, 0, 0, status);
+}
+
+static int ufshcd_tw_manual_flush_ctrl(struct ufs_hba *hba, int en)
+{
+	int err = 0;
+
+	dev_info(hba->dev, "%s: %sable turbo write manual flush\n",
+			__func__, en ? "en" : "dis");
+	if (en) {
+		err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_SET_FLAG,
+				QUERY_FLAG_IDN_TW_BUF_FLUSH, NULL);
+		if (err)
+			dev_err(hba->dev, "%s: enable turbo write failed. err = %d\n",
+					__func__, err);
+	} else {
+		err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_CLEAR_FLAG,
+				QUERY_FLAG_IDN_TW_BUF_FLUSH, NULL);
+		if (err)
+			dev_err(hba->dev, "%s: disable turbo write failed. err = %d\n",
+					__func__, err);
+	}
+
+	return err;
+}
+
+static int ufshcd_tw_flush_ctrl(struct ufs_hba *hba)
+{
+	int err = 0;
+	u32 curr_status = 0;
+
+	err = ufshcd_get_tw_buf_status(hba, &curr_status);
+
+	if (!err && (curr_status <= UFS_TW_MANUAL_FLUSH_THRESHOLD)) {
+		dev_info(hba->dev, "%s: enable tw manual flush, buf status : %d\n",
+				__func__, curr_status);
+		ufshcd_scsi_block_requests(hba->host);
+		err = ufshcd_tw_manual_flush_ctrl(hba, 1);
+		if (!err) {
+			mdelay(100);
+			err = ufshcd_tw_manual_flush_ctrl(hba, 0);
+			if (err)
+				dev_err(hba->dev, "%s: disable tw manual flush failed. err = %d\n",
+						__func__, err);
+		} else
+			dev_err(hba->dev, "%s: enable tw manual flush failed. err = %d\n",
+					__func__, err);
+		ufshcd_scsi_unblock_requests(hba->host);
+	}
+	return err;
+}
+#endif
+
 /**
  * ufshcd_memory_alloc - allocate memory for host memory space data structures
  * @hba: per adapter instance
@@ -5561,9 +5906,9 @@ int ufshcd_dme_set_attr(struct ufs_hba *hba, u32 attr_sel,
 	} while (ret && peer && --retries);
 
 	if (ret)
-		dev_err(hba->dev, "%s: attr-id 0x%x val 0x%x failed %d retries\n",
+		dev_err(hba->dev, "%s: attr-id 0x%x val 0x%x failed %d retries, err %d\n",
 			set, UIC_GET_ATTR_ID(attr_sel), mib_val,
-			UFS_UIC_COMMAND_RETRIES - retries);
+			UFS_UIC_COMMAND_RETRIES - retries, ret);
 
 	return ret;
 }
@@ -5724,6 +6069,8 @@ out:
 		ufshcd_print_pwr_info(hba);
 		ufshcd_print_host_regs(hba);
 		ufshcd_print_cmd_log(hba);
+		if (hba->crash_on_err)
+			BUG_ON(1);
 	}
 
 	ufshcd_save_tstamp_of_last_dme_cmd(hba);
@@ -5872,6 +6219,7 @@ static int __ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
 								POST_CHANGE);
 		dev_dbg(hba->dev, "%s: Hibern8 Enter at %lld us", __func__,
 			ktime_to_us(ktime_get()));
+		SEC_ufs_update_h8_info(hba, true);
 	}
 
 	return ret;
@@ -5927,6 +6275,7 @@ int ufshcd_uic_hibern8_exit(struct ufs_hba *hba)
 			ktime_to_us(ktime_get()));
 		hba->ufs_stats.last_hibern8_exit_tstamp = ktime_get();
 		hba->ufs_stats.hibern8_exit_cnt++;
+		SEC_ufs_update_h8_info(hba, false);
 	}
 
 	return ret;
@@ -5983,7 +6332,6 @@ static int ufshcd_get_max_pwr_mode(struct ufs_hba *hba)
 	 * Then, get the maximum gears of PWM speed.
 	 */
 	ufshcd_dme_get(hba, UIC_ARG_MIB(PA_MAXRXHSGEAR), &pwr_info->gear_rx);
-
 	if (!pwr_info->gear_rx) {
 		ufshcd_dme_get(hba, UIC_ARG_MIB(PA_MAXRXPWMGEAR),
 				&pwr_info->gear_rx);
@@ -6084,15 +6432,15 @@ int ufshcd_change_power_mode(struct ufs_hba *hba,
 
 	if (pwr_mode->gear_tx == UFS_HS_G4) {
 		ret = ufshcd_dme_peer_get(hba,
-				UIC_ARG_MIB_SEL(RX_HS_ADAPT_INITIAL_CAPABILITY,
+				 UIC_ARG_MIB_SEL(RX_HS_ADAPT_INITIAL_CAPABILITY,
 					UIC_ARG_MPHY_RX_GEN_SEL_INDEX(0)),
-				&peer_rx_hs_adapt_initial_cap);
+				    &peer_rx_hs_adapt_initial_cap);
 		if (ret) {
 			dev_err(hba->dev,
-					"%s: RX_HS_ADAPT_INITIAL_CAP get failed %d\n",
-					__func__, ret);
+				"%s: RX_HS_ADAPT_INITIAL_CAP get failed %d\n",
+				__func__, ret);
 			peer_rx_hs_adapt_initial_cap =
-				PA_PEERRXHSADAPTINITIAL_Default;
+						PA_PEERRXHSADAPTINITIAL_Default;
 		}
 		ret = ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PEERRXHSADAPTINITIAL),
 				     peer_rx_hs_adapt_initial_cap);
@@ -6503,8 +6851,13 @@ static int ufshcd_verify_dev_init(struct ufs_hba *hba)
 {
 	int err = 0;
 	int retries;
+	bool has_read_lock = false;
 
 	ufshcd_hold_all(hba);
+	if (!ufshcd_is_shutdown_ongoing(hba) && !ufshcd_eh_in_progress(hba)) {
+		down_read(&hba->lock);
+		has_read_lock = true;
+	}
 	mutex_lock(&hba->dev_cmd.lock);
 	for (retries = NOP_OUT_RETRIES; retries > 0; retries--) {
 		err = ufshcd_exec_dev_cmd(hba, DEV_CMD_TYPE_NOP,
@@ -6516,6 +6869,8 @@ static int ufshcd_verify_dev_init(struct ufs_hba *hba)
 		dev_dbg(hba->dev, "%s: error %d retrying\n", __func__, err);
 	}
 	mutex_unlock(&hba->dev_cmd.lock);
+	if (has_read_lock)
+		up_read(&hba->lock);
 	ufshcd_release_all(hba);
 
 	if (err)
@@ -6567,7 +6922,7 @@ static void ufshcd_set_queue_depth(struct scsi_device *sdev)
 }
 
 /**
- * ufshcd_get_boot_lun - get boot lun
+ * ufshcd_get_bootlunID - get boot lun
  * @sdev: pointer to SCSI device
  *
  * Read bBootLunID in UNIT Descriptor to find boot LUN
@@ -6590,6 +6945,49 @@ static void ufshcd_get_bootlunID(struct scsi_device *sdev)
 		bBootLunID = 0;
 	else
 		sdev->bootlunID = bBootLunID;
+}
+
+/**
+ * ufshcd_get_twbuf_unit - get tw buffer alloc units
+ * @sdev: pointer to SCSI device
+ *
+ * Read dLUNumTurboWriteBufferAllocUnits in UNIT Descriptor
+ * to check if LU supports turbo write feature
+ */
+static void ufshcd_get_twbuf_unit(struct scsi_device *sdev)
+{
+	int ret = 0;
+	u32 dLUNumTurboWriteBufferAllocUnits = 0;
+	u8 desc_buf[4];
+	struct ufs_hba *hba;
+
+	hba = shost_priv(sdev->host);
+	if (!hba->support_tw)
+		return;
+
+	ret = ufshcd_read_unit_desc_param(hba,
+			ufshcd_scsi_to_upiu_lun(sdev->lun),
+			UNIT_DESC_PARAM_TW_BUF_ALLOC_UNIT,
+			desc_buf,
+			sizeof(dLUNumTurboWriteBufferAllocUnits));
+
+	/* Some WLUN doesn't support unit descriptor */
+	if ((ret == -EOPNOTSUPP) || scsi_is_wlun(sdev->lun)) {
+		sdev->support_tw_lu = false;
+		return;
+	}
+
+	dLUNumTurboWriteBufferAllocUnits = ((desc_buf[0] << 24)|
+			(desc_buf[1] << 16) |
+			(desc_buf[2] << 8) |
+			desc_buf[3]);
+
+	if (dLUNumTurboWriteBufferAllocUnits) {
+		sdev->support_tw_lu = true;
+		dev_info(hba->dev, "%s: LU %d supports tw, twbuf unit : 0x%x\n",
+				__func__, sdev->lun, dLUNumTurboWriteBufferAllocUnits);
+	} else
+		sdev->support_tw_lu = false;
 }
 
 /*
@@ -6677,6 +7075,8 @@ static int ufshcd_slave_alloc(struct scsi_device *sdev)
 	ufshcd_get_lu_power_on_wp_status(hba, sdev);
 
 	ufshcd_get_bootlunID(sdev);
+
+	ufshcd_get_twbuf_unit(sdev);
 
 	return 0;
 }
@@ -7031,6 +7431,11 @@ static void __ufshcd_transfer_req_compl(struct ufs_hba *hba,
 			result = ufshcd_transfer_rsp_status(hba, lrbp);
 			scsi_dma_unmap(cmd);
 
+			if (ufshcd_is_tw_on(hba) && (rq_data_dir(cmd->request) == WRITE)) {
+				int transfer_len = 0;
+				transfer_len = be32_to_cpu(lrbp->ucd_req_ptr->sc.exp_data_transfer_len);
+				SEC_ufs_update_tw_info(hba, transfer_len);
+			}
 #if defined(CONFIG_UFS_DATA_LOG)
 			if (cmd->request && hba->host->ufs_sys_log_en){
 				/*condition of data log*/
@@ -7426,7 +7831,6 @@ static int ufshcd_bkops_ctrl(struct ufs_hba *hba,
 				err, curr_status);
 	} else
 		err = ufshcd_disable_auto_bkops(hba);
-
 out:
 	return err;
 }
@@ -8473,7 +8877,10 @@ static int ufshcd_abort(struct scsi_cmnd *cmd)
 	 * To avoid these unnecessary/illegal step we skip to the last error
 	 * handling stage: reset and restore.
 	 */
-	if (lrbp->lun == UFS_UPIU_UFS_DEVICE_WLUN)
+	if ((lrbp->lun == UFS_UPIU_UFS_DEVICE_WLUN) ||
+	    (lrbp->lun == UFS_UPIU_REPORT_LUNS_WLUN) ||
+	    (lrbp->lun == UFS_UPIU_BOOT_WLUN) ||
+	    (lrbp->lun == UFS_UPIU_RPMB_WLUN))
 		return ufshcd_eh_host_reset_handler(cmd);
 
 	ufshcd_hold_all(hba);
@@ -8512,6 +8919,9 @@ static int ufshcd_abort(struct scsi_cmnd *cmd)
 		ufshcd_print_host_state(hba);
 		ufshcd_print_pwr_info(hba);
 		ufshcd_print_trs(hba, 1 << tag, true);
+		/* crash the system upon setting this debugfs. */
+		if (hba->crash_on_err)
+			BUG_ON(1);
 	} else {
 		ufshcd_print_trs(hba, 1 << tag, false);
 	}
@@ -8706,7 +9116,10 @@ static int ufshcd_reset_and_restore(struct ufs_hba *hba)
 	unsigned long flags;
 	int retries = MAX_HOST_RESET_RETRIES;
 
+	ufshcd_reset_tw(hba, false);
+
 	ssleep(2);
+	ufshcd_enable_irq(hba);
 
 	do {
 		err = ufshcd_detect_device(hba);
@@ -8920,13 +9333,13 @@ out:
 }
 
 static int ufshcd_set_low_vcc_level(struct ufs_hba *hba,
-		struct ufs_dev_desc *dev_desc)
+				  struct ufs_dev_desc *dev_desc)
 {
 	int ret;
 	struct ufs_vreg *vreg = hba->vreg_info.vcc;
 
 	/* Check if device supports the low voltage VCC feature */
-	if (dev_desc->wspecversion < 0x300 && !ufshcd_is_g4_supported(hba))
+	if (dev_desc->wspecversion < 0x300)
 		return 0;
 
 	/*
@@ -9055,6 +9468,7 @@ static int ufs_get_device_desc(struct ufs_hba *hba,
 	u8 model_index;
 	u8 str_desc_buf[QUERY_DESC_MAX_SIZE + 1] = {0};
 	u8 desc_buf[hba->desc_size.dev_desc];
+	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
 
 	err = ufshcd_read_device_desc(hba, desc_buf, hba->desc_size.dev_desc);
 	if (err) {
@@ -9092,6 +9506,35 @@ static int ufs_get_device_desc(struct ufs_hba *hba,
 				  desc_buf[DEVICE_DESC_PARAM_SPEC_VER + 1];
 
 	dev_err(hba->dev, "%s: UFS spec 0x%04x.\n", __func__, dev_desc->wspecversion);
+
+	/* the device desc size of ufs 3.1 is different with the one of prev ver. */
+	if (hba->desc_size.dev_desc < (DEVICE_DESC_PARAM_EXT_FEAT_SUPPORT + 3)) {
+		hba->support_tw = false;
+		goto out;
+	}
+
+	dev_desc->dextfeatsupport = ((desc_buf[DEVICE_DESC_PARAM_EXT_FEAT_SUPPORT] << 24)|
+			(desc_buf[DEVICE_DESC_PARAM_EXT_FEAT_SUPPORT + 1] << 16) |
+			(desc_buf[DEVICE_DESC_PARAM_EXT_FEAT_SUPPORT + 2] << 8) |
+			desc_buf[DEVICE_DESC_PARAM_EXT_FEAT_SUPPORT + 3]);
+
+	if (host->enable_tw && (dev_desc->dextfeatsupport & 0x100)) {
+		dev_info(hba->dev,"%s: ufs device supports turbo write\n", __func__);
+		if (hba->dev_info.i_lt < UFS_TW_DISABLE_THRESHOLD) {
+			/* if device supports tw, enable hibern flush */
+			err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_SET_FLAG,
+					QUERY_FLAG_IDN_TW_FLUSH_HIBERN, NULL);
+			if (err) {
+				dev_err(hba->dev, "%s: Failed to enable tw hibern flush. err = %d\n",
+						__func__, err);
+				goto out;
+			}
+			hba->support_tw = true;
+			dev_info(hba->dev,"%s: ufs turbo write is enabled\n", __func__);
+		} else
+			hba->support_tw = false;
+	} else
+		hba->support_tw = false;
 
 out:
 	return err;
@@ -9569,34 +10012,6 @@ static int ufshcd_reset_all_before_retry_setup_link(struct ufs_hba *hba)
 }
 
 /**
- * ufshcd_is_g4_supported - check if device supports HS-G4
- * @hba: per-adapter instance
- *
- * Returns True if device supports HS-G4, False otherwise.
- */
-static bool ufshcd_is_g4_supported(struct ufs_hba *hba)
-{
-	int ret;
-	u32 tx_hsgear = 0;
-
-	/* check device capability */
-	ret = ufshcd_dme_peer_get(hba,
-			UIC_ARG_MIB_SEL(TX_HSGEAR_CAPABILITY,
-				UIC_ARG_MPHY_TX_GEN_SEL_INDEX(0)),
-			&tx_hsgear);
-	if (ret) {
-		dev_err(hba->dev, "%s: Failed getting peer TX_HSGEAR_CAPABILITY. err = %d\n",
-				__func__, ret);
-		return false;
-	}
-
-	if (tx_hsgear == UFS_HS_G4)
-		return true;
-	else
-		return false;
-}
-
-/**
  * ufshcd_probe_hba - probe hba to detect device and initialize
  * @hba: per-adapter instance
  *
@@ -9650,13 +10065,7 @@ reinit:
 		goto out;
 	}
 
-	/*
-	 * Note: Some UFS 3.0 devices may still advertise UFS specification
-	 * version as 2.1. So let's also read the TX_HSGEAR_CAPABILITY from
-	 * device to know if device support HS-G4 or not.
-	 */
-	if ((card.wspecversion >= 0x300 || ufshcd_is_g4_supported(hba)) &&
-			!hba->reinit_g4_rate_A) {
+	if (card.wspecversion >= 0x300 && !hba->reinit_g4_rate_A) {
 		unsigned long flags;
 		int err;
 		struct ufs_qcom_host *host = ufshcd_get_variant(hba);
@@ -9666,12 +10075,12 @@ reinit:
 		err = ufshcd_vops_full_reset(hba);
 		if (err)
 			dev_warn(hba->dev, "%s: full reset returned %d\n",
-					__func__, err);
+				 __func__, err);
 
 		err = ufshcd_reset_device(hba);
 		if (err)
 			dev_warn(hba->dev, "%s: device reset failed. err %d\n",
-					__func__, err);
+				 __func__, err);
 
 		/* reset the SEC error info */
 		memset(&(hba->SEC_err_info), 0, sizeof(struct SEC_UFS_counting));
@@ -9694,10 +10103,13 @@ reinit:
 	ufshcd_tune_unipro_params(hba);
 
 	ufshcd_apply_pm_quirks(hba);
-	ret = ufshcd_set_vccq_rail_unused(hba,
-		(hba->dev_info.quirks & UFS_DEVICE_NO_VCCQ) ? true : false);
-	if (ret)
-		goto out;
+	if (card.wspecversion < 0x300) {
+		ret = ufshcd_set_vccq_rail_unused(hba,
+			(hba->dev_info.quirks & UFS_DEVICE_NO_VCCQ) ?
+			true : false);
+		if (ret)
+			goto out;
+	}
 
 	/* UFS device is also active now */
 	ufshcd_set_ufs_dev_active(hba);
@@ -9733,6 +10145,13 @@ reinit:
 
 	/* set the state as operational after switching to desired gear */
 	hba->ufshcd_state = UFSHCD_STATE_OPERATIONAL;
+
+	if (hba->support_tw) {
+		if (!ufshcd_eh_in_progress(hba) && !hba->pm_op_in_progress) {
+			hba->SEC_tw_info.tw_state_ts = jiffies;
+			get_monotonic_boottime(&(hba->SEC_tw_info_old.timestamp));
+		}
+	}
 
 	/*
 	 * If we are in error handling context or in power management callbacks
@@ -9783,6 +10202,9 @@ out:
 	if (ret && link_retry_count++ < UFS_LINK_SETUP_RETRIES) {
 		dev_err(hba->dev, "%s: error with %d, and will be reset.(%d)\n",
 				__func__, ret, link_retry_count);
+#if defined(CONFIG_SCSI_UFS_TEST_MODE)
+		ufshcd_vops_dbg_register_dump(hba, false);
+#endif
 		if (!ufshcd_reset_all_before_retry_setup_link(hba))
 			goto reinit;
 	}
@@ -10244,6 +10666,7 @@ static struct scsi_host_template ufshcd_driver_template = {
 	.eh_device_reset_handler = ufshcd_eh_device_reset_handler,
 	.eh_host_reset_handler   = ufshcd_eh_host_reset_handler,
 	.eh_timed_out		= ufshcd_eh_timed_out,
+	.tw_ctrl                = ufshcd_tw_ctrl,
 	.ioctl			= ufshcd_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl		= ufshcd_ioctl,
@@ -11006,7 +11429,16 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	enum ufs_dev_pwr_mode req_dev_pwr_mode;
 	enum uic_link_state req_link_state;
 
+	if (!mutex_trylock(&hba->tw_ctrl_mutex)) {
+		dev_err(hba->dev, "%s has failed %d.\n", __func__, -EBUSY);
+		return -EBUSY;
+	}
+
+	if (ufshcd_is_system_pm(pm_op))
+		dev_info(hba->dev, "%s: enter.\n", __func__);
+
 	hba->pm_op_in_progress = 1;
+
 	if (!ufshcd_is_shutdown_pm(pm_op)) {
 		pm_lvl = ufshcd_is_runtime_pm(pm_op) ?
 			 hba->rpm_lvl : hba->spm_lvl;
@@ -11062,6 +11494,14 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 		}
 	}
 
+#ifdef CONFIG_SCSI_UFS_SUPPORT_TW_MAN_GC
+	if (!ufshcd_is_shutdown_pm(pm_op) && hba->support_tw && ufshcd_is_system_pm(pm_op))
+		ufshcd_tw_flush_ctrl(hba);
+#endif
+
+	if (ufshcd_is_system_pm(pm_op))
+		ufshcd_reset_tw(hba, true);
+
 	if ((req_dev_pwr_mode != hba->curr_dev_pwr_mode) &&
 	     ((ufshcd_is_runtime_pm(pm_op) && !hba->auto_bkops_enabled) ||
 	       !ufshcd_is_runtime_pm(pm_op))) {
@@ -11071,6 +11511,8 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 		if (ret)
 			goto enable_gating;
 	}
+
+	ufshcd_scsi_block_requests(hba);
 
 	ret = ufshcd_link_state_transition(hba, req_link_state, 1);
 	if (ret)
@@ -11129,6 +11571,7 @@ set_link_active:
 		ufshcd_host_reset_and_restore(hba);
 	}
 set_dev_active:
+	ufshcd_scsi_unblock_requests(hba);
 	if (!ufshcd_set_dev_pwr_mode(hba, UFS_ACTIVE_PWR_MODE))
 		ufshcd_disable_auto_bkops(hba);
 enable_gating:
@@ -11138,7 +11581,11 @@ enable_gating:
 	hba->clk_gating.is_suspended = false;
 	ufshcd_release_all(hba);
 out:
+	if (!ret && ufshcd_is_system_pm(pm_op))
+		hba->tw_state_not_allowed = true;
+
 	hba->pm_op_in_progress = 0;
+	mutex_unlock(&hba->tw_ctrl_mutex);
 
 	if (ret)
 		ufshcd_update_error_stats(hba, UFS_ERR_SUSPEND);
@@ -11165,6 +11612,7 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	old_link_state = hba->uic_link_state;
 
 	ufshcd_hba_vreg_set_hpm(hba);
+	ufshcd_scsi_unblock_requests(hba);
 	/* Make sure clocks are enabled before accessing controller */
 	ret = ufshcd_enable_clocks(hba);
 	if (ret)
@@ -11176,7 +11624,19 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	ret = ufshcd_vreg_set_hpm(hba);
 	if (ret)
 		goto disable_irq_and_vops_clks;
-
+	if (hba->restore) {
+		/* Configure UTRL and UTMRL base address registers */
+		ufshcd_writel(hba, lower_32_bits(hba->utrdl_dma_addr),
+			      REG_UTP_TRANSFER_REQ_LIST_BASE_L);
+		ufshcd_writel(hba, upper_32_bits(hba->utrdl_dma_addr),
+			      REG_UTP_TRANSFER_REQ_LIST_BASE_H);
+		ufshcd_writel(hba, lower_32_bits(hba->utmrdl_dma_addr),
+			      REG_UTP_TASK_REQ_LIST_BASE_L);
+		ufshcd_writel(hba, upper_32_bits(hba->utmrdl_dma_addr),
+			      REG_UTP_TASK_REQ_LIST_BASE_H);
+		/* Commit the registers */
+		mb();
+	}
 	/*
 	 * Call vendor specific resume callback. As these callbacks may access
 	 * vendor specific host controller register space call them when the
@@ -11190,6 +11650,10 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	    (ufshcd_is_card_offline(hba) ||
 	     (ufshcd_is_card_online(hba) && !hba->sdev_ufs_device)))
 		goto skip_dev_ops;
+
+	/* Resuming from hibernate, assume that link was OFF */
+	if (hba->restore)
+		ufshcd_set_link_off(hba);
 
 	if (ufshcd_is_link_hibern8(hba)) {
 		ret = ufshcd_uic_hibern8_exit(hba);
@@ -11261,6 +11725,12 @@ disable_irq_and_vops_clks:
 		hba->clk_gating.state = CLKS_OFF;
 out:
 	hba->pm_op_in_progress = 0;
+
+	if (hba->tw_state_not_allowed)
+		hba->tw_state_not_allowed = false;
+
+	if (hba->restore)
+		hba->restore = false;
 
 	if (ret)
 		ufshcd_update_error_stats(hba, UFS_ERR_RESUME);
@@ -11339,10 +11809,30 @@ int ufshcd_system_resume(struct ufs_hba *hba)
 		goto out;
 	else
 		ret = ufshcd_resume(hba, UFS_SYSTEM_PM);
+
+	if (!ret) {
+		int err = 0;
+		u8 health_buf[hba->desc_size.hlth_desc];
+
+		err = ufshcd_read_desc(hba, QUERY_DESC_IDN_HEALTH, 0, health_buf,
+				hba->desc_size.hlth_desc);
+		if (err) {
+			hba->dev_info.i_lt = 0x0;
+			dev_err(hba->dev, "%s: HEALTH desc read fail, err = %d\n",
+					__func__, err);
+		} else {
+			hba->dev_info.i_lt = health_buf[HEALTH_DEVICE_DESC_PARAM_LIFETIMEA];
+			dev_err(hba->dev, "LT: 0x%01x%01x\n", health_buf[HEALTH_DEVICE_DESC_PARAM_LIFETIMEA],
+					health_buf[HEALTH_DEVICE_DESC_PARAM_LIFETIMEB]);
+		}
+	}
+
 out:
 	trace_ufshcd_system_resume(dev_name(hba->dev), ret,
 		ktime_to_us(ktime_sub(ktime_get(), start)),
 		hba->curr_dev_pwr_mode, hba->uic_link_state);
+	if (!ret)
+		hba->is_sys_suspended = false;
 	return ret;
 }
 EXPORT_SYMBOL(ufshcd_system_resume);
@@ -11421,6 +11911,25 @@ int ufshcd_runtime_idle(struct ufs_hba *hba)
 	return 0;
 }
 EXPORT_SYMBOL(ufshcd_runtime_idle);
+
+int ufshcd_system_freeze(struct ufs_hba *hba)
+{
+	return ufshcd_system_suspend(hba);
+}
+EXPORT_SYMBOL(ufshcd_system_freeze);
+
+int ufshcd_system_restore(struct ufs_hba *hba)
+{
+	hba->restore = true;
+	return ufshcd_system_resume(hba);
+}
+EXPORT_SYMBOL(ufshcd_system_restore);
+
+int ufshcd_system_thaw(struct ufs_hba *hba)
+{
+	return ufshcd_system_resume(hba);
+}
+EXPORT_SYMBOL(ufshcd_system_thaw);
 
 static inline ssize_t ufshcd_pm_lvl_store(struct device *dev,
 					   struct device_attribute *attr,
@@ -11723,6 +12232,43 @@ SEC_UFS_DATA_ATTR(SEC_UFS_err_sum, "\"OPERR\":\"%d\",\"UICCMD\":\"%d\",\"UICERR\
 		err_info->query_count.Query_err);
 #endif
 
+#ifdef CONFIG_BLK_TURBO_WRITE
+static ssize_t SEC_UFS_TW_info_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct Scsi_Host *Shost = container_of(dev, struct Scsi_Host, shost_dev);
+	struct ufs_hba *hba = shost_priv(Shost);
+	struct SEC_UFS_TW_info tw_info;
+	struct SEC_UFS_TW_info *tw_info_old = &(hba->SEC_tw_info_old);
+	struct SEC_UFS_TW_info *tw_info_new = &(hba->SEC_tw_info);
+	long hours = 0;
+
+	get_monotonic_boottime(&(tw_info_new->timestamp));
+	hours = (tw_info_new->timestamp.tv_sec - tw_info_old->timestamp.tv_sec) / 60;	/* min */
+	hours = (hours + 30) / 60;	/* round up to hours */
+
+	SEC_UFS_TW_info_get_diff(&tw_info, tw_info_new, tw_info_old);
+
+	return sprintf(buf, "\"TWCTRLCNT\":\"%llu\","
+			"\"TWCTRLERRCNT\":\"%llu\","
+			"\"TWDAILYMB\":\"%llu\","
+			"\"TWTOTALMB\":\"%llu\","
+			"\"H8CNT\":\"%llu\",\"H8MS\":\"%llu\","
+			"\"H8CNT100MS\":\"%llu\",\"H8MS100MS\":\"%llu\","
+			"\"H8MAXMS\":\"%llu\","
+			"\"TWhours\":\"%ld\"\n",
+			(tw_info.tw_enable_count + tw_info.tw_disable_count),
+			tw_info_new->tw_setflag_error_count,    /* total error count */
+			(tw_info.tw_amount_W_kb >> 10),         /* TW write daily : MB */
+			(tw_info_new->tw_amount_W_kb >> 10),    /* TW write total : MB */
+			tw_info.hibern8_enter_count, tw_info.hibern8_amount_ms,
+			tw_info.hibern8_enter_count_100ms,
+			tw_info.hibern8_amount_ms_100ms,
+			tw_info.hibern8_max_ms,
+			hours);
+}													
+static DEVICE_ATTR(SEC_UFS_TW_info, 0444, SEC_UFS_TW_info_show, NULL);
+#endif
+
 UFS_DEV_ATTR(capabilities, "%08x\n", hba->capabilities);
 UFS_DEV_ATTR(lt, "%01x\n", hba->dev_info.i_lt);
 UFS_DEV_ATTR(gear, "%01x\n", hba->pwr_info.gear_rx);
@@ -11792,6 +12338,9 @@ static struct attribute *ufs_attributes[] = {
 	&dev_attr_SEC_UFS_query_cnt.attr,
 
 	&dev_attr_SEC_UFS_err_sum.attr,
+#endif
+#ifdef CONFIG_BLK_TURBO_WRITE
+	&dev_attr_SEC_UFS_TW_info.attr,
 #endif
 	NULL
 };
@@ -12114,7 +12663,7 @@ static void ufs_sec_send_errinfo(void *data)
 				(hba->host->hw_err_cnt > 9)
 				? 9 : hba->host->hw_err_cnt);
 		pr_err("%s: Send UFS information to AP : %s\n", __func__, buf);
-#if defined(CONFIG_USER_RESET_DEBUG)
+#if defined(CONFIG_SEC_USER_RESET_DEBUG)
 		sec_debug_store_additional_dbg(DBG_1_UFS_ERR, 0, "%s", buf);
 #endif
 	}
@@ -12125,7 +12674,7 @@ static void ufs_sec_send_errinfo(void *data)
 	char buf[23];
 	sprintf(buf, "UFSErrCount is disable\n");
 	pr_err("%s: Send UFS information to AP : %s\n", __func__, buf);
-#if defined(CONFIG_USER_RESET_DEBUG)
+#if defined(CONFIG_SEC_USER_RESET_DEBUG)
 	sec_debug_store_additional_dbg(DBG_1_UFS_ERR, 0, "%s", buf);
 #endif
 }
@@ -12227,6 +12776,9 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	/* Initialize mutex for device management commands */
 	mutex_init(&hba->dev_cmd.lock);
 
+	/* Initialize TW ctrl mutex */
+	mutex_init(&hba->tw_ctrl_mutex);
+
 	init_rwsem(&hba->lock);
 
 	/* Initialize device management tag acquire wait queue */
@@ -12318,6 +12870,10 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 		hba->spm_lvl = ufs_get_desired_pm_lvl_for_dev_link_state(
 							UFS_SLEEP_PWR_MODE,
 							UIC_LINK_HIBERN8_STATE);
+
+#if defined(CONFIG_SCSI_UFS_TEST_MODE)
+	dev_info(hba->dev, "UFS test mode enabled\n");
+#endif
 
 	/* init ufs_sec_debug function */
 	ufs_sec_send_errinfo(hba);

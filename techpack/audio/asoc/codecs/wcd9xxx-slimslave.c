@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, 2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,8 +13,6 @@
 #include <linux/mutex.h>
 #include <linux/mfd/wcd9xxx/wcd9xxx_registers.h>
 #include "wcd9xxx-slimslave.h"
-
-#define SB_PGD_PORT_TX_OR_UR_CFG(port)  (0x1F0 + port)
 
 struct wcd9xxx_slim_sch {
 	u16 rx_port_ch_reg_base;
@@ -326,7 +324,7 @@ err:
 }
 EXPORT_SYMBOL(wcd9xxx_cfg_slim_sch_rx);
 
-static void wcd9xxx_slim_auto_recovery_cfg(struct wcd9xxx *wcd9xxx,
+static void wcd9xxx_slim_tx_auto_recovery_cfg(struct wcd9xxx *wcd9xxx,
 					   u16 codec_port)
 {
 	int ret;
@@ -337,10 +335,14 @@ static void wcd9xxx_slim_auto_recovery_cfg(struct wcd9xxx *wcd9xxx,
 	ret = wcd9xxx_interface_reg_write(wcd9xxx,
 			SB_PGD_PORT_TX_OR_UR_CFG(codec_port),
 			0x02);
-	if (ret < 0) {
+	if (ret < 0)
 		pr_err("%s:auto_recovery set failure for port[%d] ret[%d]",
 			__func__, codec_port, ret);
-	}
+	else
+		pr_debug("%s: auto recovery register 0x%x value: 0x%x\n",
+			__func__, SB_PGD_PORT_TX_OR_UR_CFG(codec_port),
+			wcd9xxx_interface_reg_read(wcd9xxx,
+					SB_PGD_PORT_TX_OR_UR_CFG(codec_port)));
 }
 
 /* Enable slimbus slave device for RX path */
@@ -395,8 +397,7 @@ int wcd9xxx_cfg_slim_sch_tx(struct wcd9xxx *wcd9xxx,
 		pr_debug("%s: codec_port %d tx 0x%p, payload 0x%x\n",
 			 __func__, codec_port, tx, payload);
 
-		wcd9xxx_slim_auto_recovery_cfg(wcd9xxx, codec_port);
-
+		wcd9xxx_slim_tx_auto_recovery_cfg(wcd9xxx, codec_port);
 		/* write to interface device */
 		ret = wcd9xxx_interface_reg_write(wcd9xxx,
 				SB_PGD_TX_PORT_MULTI_CHANNEL_0(codec_port),

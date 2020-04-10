@@ -194,15 +194,6 @@ void max77705_dp_detach(void *data)
 	usbpd_data->is_sent_pin_configuration = 0;
 }
 
-void max77705_otg_accessory_restart(void *data)
-{
-	struct max77705_usbc_platform_data *usbpd_data = data;
-	pr_info("%s: \n", __func__);
-	max77705_vbus_turn_on_ctrl(usbpd_data, OFF, false);
-	if (usbpd_data->pd_data->cc_status != CC_NO_CONN)
-		schedule_delayed_work(&usbpd_data->otg_accessory_restart_work, msecs_to_jiffies(800));
-}
-
 void max77705_notify_dr_status(struct max77705_usbc_platform_data *usbpd_data, uint8_t attach)
 {
 	struct max77705_pd_data *pd_data = usbpd_data->pd_data;
@@ -264,6 +255,9 @@ void max77705_notify_dr_status(struct max77705_usbc_platform_data *usbpd_data, u
 			}
 			if (usbpd_data->is_host == HOST_OFF) {
 				usbpd_data->is_host = HOST_ON;
+#ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
+				max77705_clk_booster_set(usbpd_data, 1);
+#endif
 				/* muic */
 				max77705_ccic_event_work(usbpd_data,
 					CCIC_NOTIFY_DEV_MUIC,
@@ -291,6 +285,9 @@ void max77705_notify_dr_status(struct max77705_usbc_platform_data *usbpd_data, u
 				schedule_delayed_work(&usbpd_data->acc_detach_work,
 					msecs_to_jiffies(0));
 		}
+#ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
+		max77705_clk_booster_set(usbpd_data, 0);
+#endif
 		usbpd_data->is_host = HOST_OFF;
 		usbpd_data->is_client = CLIENT_OFF;
 		/* muic */
@@ -457,6 +454,7 @@ static irqreturn_t max77705_ccistat_irq(int irq, void *data)
 #if defined(CONFIG_TYPEC)
 	enum typec_pwr_opmode mode = TYPEC_PWR_MODE_USB;
 #endif
+	usbc_cmd_data value;
 
 	max77705_read_reg(usbc_data->muic, REG_CC_STATUS0, &cc_data->cc_status0);
 	pr_debug("%s: IRQ(%d)_IN\n", __func__, irq);
@@ -482,6 +480,18 @@ static irqreturn_t max77705_ccistat_irq(int irq, void *data)
 #if defined(CONFIG_TYPEC)
 		mode = TYPEC_PWR_MODE_3_0A;
 #endif
+		if (usbc_data->srcccap_request_retry) {
+			usbc_data->pn_flag = false;			
+			usbc_data->srcccap_request_retry = false;
+			value.opcode = OPCODE_SRCCAP_REQUEST;
+			value.write_data[0] = pd_noti.sink_status.selected_pdo_num;
+			value.write_length = 1;
+			value.read_length = 1;
+			max77705_usbc_opcode_write(usbc_data, &value);
+			pr_info("%s : OPCODE(0x%02x) W_LENGTH(%d) R_LENGTH(%d) NUM(%d)\n",
+				__func__, value.opcode, value.write_length, value.read_length,
+				pd_noti.sink_status.selected_pdo_num);
+		}
 		break;
 
 	default:
@@ -603,7 +613,6 @@ static void max77705_ccstat_irq_handler(void *data, int irq)
 #endif
 
 			max77705_notify_dr_status(usbc_data, 0);
-			usbc_data->plug_attach_done = 0;
 			usbc_data->cc_data->current_pr = 0xFF;
 			usbc_data->pd_data->current_dr = 0xFF;
 			usbc_data->cc_data->current_vcon = 0xFF;
@@ -631,6 +640,7 @@ static void max77705_ccstat_irq_handler(void *data, int irq)
 			usbc_data->is_samsung_accessory_enter_mode = 0;
 			usbc_data->pn_flag = false;
 			usbc_data->pd_support = false;
+			usbc_data->srcccap_request_retry = false;
 #if defined(CONFIG_DUAL_ROLE_USB_INTF)
 			if (!usbc_data->try_state_change)
 #elif defined(CONFIG_TYPEC)
@@ -647,12 +657,13 @@ static void max77705_ccstat_irq_handler(void *data, int irq)
 #endif
 			max77705_detach_pd(usbc_data);
 			usbc_data->pd_pr_swap = cc_No_Connection;
-			cancel_delayed_work_sync(&usbc_data->otg_accessory_restart_work);
-			max77705_vbus_turn_on_ctrl(usbc_data, OFF, false);
+			if (usbc_data->plug_attach_done)
+				max77705_vbus_turn_on_ctrl(usbc_data, OFF, false);
 #if defined(CONFIG_SEC_FACTORY)
 			factory_execute_monitor(FAC_ABNORMAL_REPEAT_STATE);
 #endif
 			cancel_delayed_work(&usbc_data->check_discover_modes_work);
+			usbc_data->plug_attach_done = 0;
 			break;
 	case cc_SINK:
 			msg_maxim("ccstat : cc_SINK");
@@ -703,6 +714,7 @@ static void max77705_ccstat_irq_handler(void *data, int irq)
 			msg_maxim("ccstat : cc_SOURCE");
 			usbc_data->pd_data->cc_status = CC_SRC;
 			usbc_data->pn_flag = false;
+			usbc_data->srcccap_request_retry = false;
 #if defined(CONFIG_DUAL_ROLE_USB_INTF)
 			usbc_data->power_role = DUAL_ROLE_PROP_PR_SRC;
 			if (usbc_data->dual_role != NULL &&

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -30,11 +30,10 @@
 
 #define SDE_ENCODER_NAME_MAX	16
 
-#if defined(CONFIG_DISPLAY_SAMSUNG)
-#define KICKOFF_TIMEOUT_MS		1000
-#define PP_TIMEOUT_MS			84
-#else
 /* wait for at most 2 vsync for lowest refresh rate (24hz) */
+#if defined(CONFIG_DISPLAY_SAMSUNG)
+#define KICKOFF_TIMEOUT_MS		300
+#else
 #define KICKOFF_TIMEOUT_MS		84
 #endif
 #define KICKOFF_TIMEOUT_JIFFIES		msecs_to_jiffies(KICKOFF_TIMEOUT_MS)
@@ -206,6 +205,7 @@ struct sde_encoder_phys_ops {
  * @INTR_IDX_UNDERRUN: Underrun unterrupt for video and cmd mode panel
  * @INTR_IDX_RDPTR:    Readpointer done unterrupt for cmd mode panel
  * @INTR_IDX_WB_DONE:  Writeback done interrupt for WB
+ * @INTR_IDX_PP1_OVFL: Pingpong overflow interrupt on PP1 for Concurrent WB
  * @INTR_IDX_PP2_OVFL: Pingpong overflow interrupt on PP2 for Concurrent WB
  * @INTR_IDX_PP3_OVFL: Pingpong overflow interrupt on PP3 for Concurrent WB
  * @INTR_IDX_PP4_OVFL: Pingpong overflow interrupt on PP4 for Concurrent WB
@@ -221,6 +221,7 @@ enum sde_intr_idx {
 	INTR_IDX_RDPTR,
 	INTR_IDX_AUTOREFRESH_DONE,
 	INTR_IDX_WB_DONE,
+	INTR_IDX_PP1_OVFL,
 	INTR_IDX_PP2_OVFL,
 	INTR_IDX_PP3_OVFL,
 	INTR_IDX_PP4_OVFL,
@@ -259,6 +260,7 @@ struct sde_encoder_irq {
  * @hw_ctl:		Hardware interface to the ctl registers
  * @hw_intf:		Hardware interface to INTF registers
  * @hw_cdm:		Hardware interface to the cdm registers
+ * @hw_qdss:		Hardware interface to the qdss registers
  * @cdm_cfg:		Chroma-down hardware configuration
  * @hw_pp:		Hardware interface to the ping pong registers
  * @sde_kms:		Pointer to the sde_kms top level
@@ -272,6 +274,8 @@ struct sde_encoder_irq {
  *                      path supports SDE_CTL_ACTIVE_CFG
  * @comp_type:      Type of compression supported
  * @comp_ratio:		Compression ratio
+ * @dsc_extra_pclk_cycle_cnt: Extra pclk cycle count for DSC over DP
+ * @dsc_extra_disp_width: Additional display width for DSC over DP
  * @wide_bus_en:	Wide-bus configuraiton
  * @enc_spinlock:	Virtual-Encoder-Wide Spin Lock for IRQ purposes
  * @enable_state:	Enable state tracking
@@ -288,6 +292,7 @@ struct sde_encoder_irq {
  * @pending_retire_fence_cnt:   Atomic counter tracking the pending retire
  *                              fences that have to be signalled.
  * @pending_kickoff_wq:		Wait queue for blocking until kickoff completes
+ * @ctlstart_timeout:		Indicates if ctl start timeout occurred
  * @irq:			IRQ tracking structures
  * @has_intf_te:		Interface TE configuration support
  * @cont_splash_single_flush	Variable to check if single flush is enabled.
@@ -305,6 +310,7 @@ struct sde_encoder_phys {
 	struct sde_hw_ctl *hw_ctl;
 	struct sde_hw_intf *hw_intf;
 	struct sde_hw_cdm *hw_cdm;
+	struct sde_hw_qdss *hw_qdss;
 	struct sde_hw_cdm_cfg cdm_cfg;
 	struct sde_hw_pingpong *hw_pp;
 	struct sde_kms *sde_kms;
@@ -316,6 +322,8 @@ struct sde_encoder_phys {
 	struct sde_hw_intf_cfg_v1 intf_cfg_v1;
 	enum msm_display_compression_type comp_type;
 	enum msm_display_compression_ratio comp_ratio;
+	u32 dsc_extra_pclk_cycle_cnt;
+	u32 dsc_extra_disp_width;
 	bool wide_bus_en;
 	spinlock_t *enc_spinlock;
 	enum sde_enc_enable_state enable_state;
@@ -327,6 +335,7 @@ struct sde_encoder_phys {
 	atomic_t pending_ctlstart_cnt;
 	atomic_t pending_kickoff_cnt;
 	atomic_t pending_retire_fence_cnt;
+	atomic_t ctlstart_timeout;
 	wait_queue_head_t pending_kickoff_wq;
 	struct sde_encoder_irq irq[INTR_IDX_MAX];
 	bool has_intf_te;
@@ -409,13 +418,14 @@ struct sde_encoder_phys_cmd {
  * @hw_wb:		Hardware interface to the wb registers
  * @wbdone_timeout:	Timeout value for writeback done in msec
  * @bypass_irqreg:	Bypass irq register/unregister if non-zero
- * @wbdone_complete:	for wbdone irq synchronization
  * @wb_cfg:		Writeback hardware configuration
  * @cdp_cfg:		Writeback CDP configuration
  * @wb_roi:		Writeback region-of-interest
  * @wb_fmt:		Writeback pixel format
  * @wb_fb:		Pointer to current writeback framebuffer
  * @wb_aspace:		Pointer to current writeback address space
+ * @cwb_old_fb:		Pointer to old writeback framebuffer
+ * @cwb_old_aspace:	Pointer to old writeback address space
  * @frame_count:	Counter of completed writeback operations
  * @kickoff_count:	Counter of issued writeback operations
  * @aspace:		address space identifier for non-secure/secure domain
@@ -431,13 +441,14 @@ struct sde_encoder_phys_wb {
 	struct sde_hw_wb *hw_wb;
 	u32 wbdone_timeout;
 	u32 bypass_irqreg;
-	struct completion wbdone_complete;
 	struct sde_hw_wb_cfg wb_cfg;
 	struct sde_hw_wb_cdp_cfg cdp_cfg;
 	struct sde_rect wb_roi;
 	const struct sde_format *wb_fmt;
 	struct drm_framebuffer *wb_fb;
 	struct msm_gem_address_space *wb_aspace;
+	struct drm_framebuffer *cwb_old_fb;
+	struct msm_gem_address_space *cwb_old_aspace;
 	u32 frame_count;
 	u32 kickoff_count;
 	struct msm_gem_address_space *aspace[SDE_IOMMU_DOMAIN_MAX];

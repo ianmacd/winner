@@ -106,13 +106,13 @@ void make_self_dispaly_img_cmds_XA0(struct samsung_display_driver_data *vdd,
 	/* Image Check Sum Calculation */
 	for (i = 0; i < data_size; i=i+4)
 		check_sum_0 += data[i];
-	
+
 	for (i = 1; i < data_size; i=i+4)
 		check_sum_1 += data[i];
-	
+
 	for (i = 2; i < data_size; i=i+4)
 		check_sum_2 += data[i];
-	
+
 	for (i = 3; i < data_size; i=i+4)
 		check_sum_3 += data[i];
 
@@ -271,13 +271,13 @@ static void self_icon_img_write(struct samsung_display_driver_data *vdd)
 	LCD_ERR("++\n");
 
 	vdd->exclusive_tx.enable = 1;
-	
+
 	ss_set_exclusive_tx_packet(vdd, TX_LEVEL1_KEY_ENABLE, 1);
 	ss_set_exclusive_tx_packet(vdd, TX_SELF_ICON_SET_PRE, 1);
 	ss_set_exclusive_tx_packet(vdd, TX_SELF_ICON_IMAGE, 1);
 	ss_set_exclusive_tx_packet(vdd, TX_SELF_ICON_SET_POST, 1);
 	ss_set_exclusive_tx_packet(vdd, TX_LEVEL1_KEY_DISABLE, 1);
-	
+
 	ss_send_cmd(vdd, TX_LEVEL1_KEY_ENABLE);
 	ss_send_cmd(vdd, TX_SELF_ICON_SET_PRE);
 	ss_send_cmd(vdd, TX_SELF_ICON_IMAGE);
@@ -292,7 +292,7 @@ static void self_icon_img_write(struct samsung_display_driver_data *vdd)
 
 	vdd->exclusive_tx.enable = 0;
 	wake_up_all(&vdd->exclusive_tx.ex_tx_waitq);
-	
+
 	LCD_ERR("--\n");
 }
 
@@ -453,7 +453,7 @@ static void self_aclock_img_write(struct samsung_display_driver_data *vdd)
 	LCD_ERR("++\n");
 
 	vdd->exclusive_tx.enable = 1;
-	
+
 	ss_set_exclusive_tx_packet(vdd, TX_LEVEL1_KEY_ENABLE, 1);
 	ss_set_exclusive_tx_packet(vdd, TX_SELF_ACLOCK_SET_PRE, 1);
 	ss_set_exclusive_tx_packet(vdd, TX_SELF_ACLOCK_IMAGE, 1);
@@ -476,7 +476,7 @@ static void self_aclock_img_write(struct samsung_display_driver_data *vdd)
 
 	vdd->exclusive_tx.enable = 0;
 	wake_up_all(&vdd->exclusive_tx.ex_tx_waitq);
-	
+
 	LCD_ERR("--\n");
 }
 
@@ -620,7 +620,7 @@ static void self_dclock_on(struct samsung_display_driver_data *vdd, int enable)
 static void self_dclock_img_write(struct samsung_display_driver_data *vdd)
 {
 	LCD_ERR("++\n");
-	
+
 	vdd->exclusive_tx.enable = 1;
 
 	ss_set_exclusive_tx_packet(vdd, TX_LEVEL1_KEY_ENABLE, 1);
@@ -645,7 +645,7 @@ static void self_dclock_img_write(struct samsung_display_driver_data *vdd)
 
 	vdd->exclusive_tx.enable = 0;
 	wake_up_all(&vdd->exclusive_tx.ex_tx_waitq);
-	
+
 	LCD_ERR("--\n");
 }
 
@@ -825,9 +825,16 @@ static void self_mask_on(struct samsung_display_driver_data *vdd, int enable)
 	mutex_lock(&vdd->self_disp.vdd_self_mask_lock);
 
 	if (enable) {
-		if (vdd->is_factory_mode && vdd->self_disp.factory_support)
-			ss_send_cmd(vdd, TX_SELF_MASK_ON_FACTORY);
-		else
+		if (vdd->is_factory_mode && vdd->self_disp.factory_support) {
+			/*
+			 * To detect self mask problem in factory,
+			 *  use normal self mask on command which is controled via /sys/class/lcd/panel/self_mask node
+			 */
+			if (enable == 2) /* Normal Self Mask On in Factory Binary */
+				ss_send_cmd(vdd, TX_SELF_MASK_ON);
+			else
+				ss_send_cmd(vdd, TX_SELF_MASK_ON_FACTORY);
+		} else
 			ss_send_cmd(vdd, TX_SELF_MASK_ON);
 	} else
 		ss_send_cmd(vdd, TX_SELF_MASK_OFF);
@@ -1249,6 +1256,11 @@ static ssize_t self_display_write(struct file *file, const char __user *buf,
 
 	if (unlikely(!buf)) {
 		LCD_ERR("invalid read buffer\n");
+		return -EINVAL;
+	}
+
+	if (count <= IMAGE_HEADER_SIZE) {
+		LCD_ERR("Invalid Buffer Size (%d)\n", (int)count);
 		return -EINVAL;
 	}
 

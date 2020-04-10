@@ -11,11 +11,7 @@
 #ifndef __CS35L41_H
 #define __CS35L41_H
 
-#ifdef CONFIG_SEC_WINNERLTE_PROJECT
-#ifdef CONFIG_SEC_FACTORY
 #include <sound/soc.h>
-#endif
-#endif
 
 struct classh_cfg {
 	bool classh_bst_override;
@@ -41,6 +37,8 @@ struct cs35l41_platform_data {
 	bool right_channel;
 	bool amp_gain_zc;
 	bool dsp_ng_enable;
+	bool inv_pcm;
+	bool use_fsync_errata;	
 	int bst_ind;
 	int bst_vctrl;
 	int bst_ipk;
@@ -56,14 +54,12 @@ struct cs35l41_platform_data {
 	unsigned int fixed_wl;
 	bool fixed_params;
 	const char * dsp_part_name;
+	const char * mfd_suffix;
 	struct cs35l41_irq_cfg irq_config1;
 	struct cs35l41_irq_cfg irq_config2;
 	struct classh_cfg classh_config;
 };
 
-#ifdef CONFIG_SEC_WINNERLTE_PROJECT
-#ifdef CONFIG_SEC_FACTORY
 int cs35l41_reinit(struct snd_soc_codec *codec);
-#endif
-#endif
+
 #endif /* __CS35L41_H */

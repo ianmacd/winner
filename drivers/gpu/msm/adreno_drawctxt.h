@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -145,10 +145,12 @@ static inline const char *get_api_type_str(unsigned int type)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(ctxt_type_table) - 1; i++) {
+	for (i = 0; i < ARRAY_SIZE(ctxt_type_table); i++) {
 		if (ctxt_type_table[i].type == type)
 			return ctxt_type_table[i].str;
 	}
 	return "UNKNOWN";
 }
+
+bool adreno_drawctxt_has_secure(struct kgsl_device *device);
 #endif  /* __ADRENO_DRAWCTXT_H */

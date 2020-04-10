@@ -388,6 +388,9 @@ static const char * const fw_path[] = {
 	"/lib/firmware",
 	"/firmware/image",
 	"/vendor/firmware-modem/image"
+#ifdef CONFIG_SUPPORT_SSC_SPU
+        ,"/spu/sensorhub"
+#endif
 };
 
 /*

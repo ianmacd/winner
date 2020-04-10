@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013, 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -140,7 +140,8 @@ static int update_config(struct clk_rcg2 *rcg, u32 cfg)
 
 	if (!strcmp(name, "disp_cc_mdss_mdp_clk_src"))
 		disp_cc_dump_clocks();
-	return 0;
+
+	return -EBUSY;
 }
 
 static int clk_rcg2_set_parent(struct clk_hw *hw, u8 index)
@@ -263,19 +264,25 @@ static unsigned long
 clk_rcg2_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
 {
 	struct clk_rcg2 *rcg = to_clk_rcg2(hw);
-	u32 cfg, hid_div, m = 0, n = 0, mode = 0, mask;
+	const struct freq_tbl *f_curr;
+	u32 cfg, src, hid_div, m = 0, n = 0, mode = 0, mask;
+	unsigned long recalc_rate;
 
 	if (rcg->flags & DFS_ENABLE_RCG)
 		return rcg->current_freq;
 
-	if (rcg->enable_safe_config && !clk_hw_is_prepared(hw)) {
+	regmap_read(rcg->clkr.regmap, rcg->cmd_rcgr + rcg->cfg_off + CFG_REG,
+									&cfg);
+	src = cfg;
+	src &= CFG_SRC_SEL_MASK;
+	src >>= CFG_SRC_SEL_SHIFT;
+
+	if (rcg->enable_safe_config && (!clk_hw_is_prepared(hw)
+				|| !clk_hw_is_enabled(hw)) && !src) {
 		if (!rcg->current_freq)
 			rcg->current_freq = cxo_f.freq;
 		return rcg->current_freq;
 	}
-
-	regmap_read(rcg->clkr.regmap, rcg->cmd_rcgr + rcg->cfg_off + CFG_REG,
-			&cfg);
 
 	if (rcg->mnd_width) {
 		mask = BIT(rcg->mnd_width) - 1;
@@ -291,11 +298,29 @@ clk_rcg2_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
 		mode >>= CFG_MODE_SHIFT;
 	}
 
-	mask = BIT(rcg->hid_width) - 1;
-	hid_div = cfg >> CFG_SRC_DIV_SHIFT;
-	hid_div &= mask;
+	if (rcg->enable_safe_config && !src) {
+		f_curr = qcom_find_freq(rcg->freq_tbl, rcg->current_freq);
+		if (!f_curr)
+			return -EINVAL;
 
-	return clk_rcg2_calc_rate(parent_rate, m, n, mode, hid_div);
+		hid_div = f_curr->pre_div;
+	} else {
+		mask = BIT(rcg->hid_width) - 1;
+		hid_div = cfg >> CFG_SRC_DIV_SHIFT;
+		hid_div &= mask;
+	}
+
+
+	recalc_rate = clk_rcg2_calc_rate(parent_rate, m, n, mode, hid_div);
+
+	/*
+	 * Check the case when the RCG has been initialized to a non-CXO
+	 * frequency.
+	 */
+	if (rcg->enable_safe_config && !rcg->current_freq)
+		rcg->current_freq = recalc_rate;
+
+	return recalc_rate;
 }
 
 static int _freq_tbl_determine_rate(struct clk_hw *hw, const struct freq_tbl *f,
@@ -381,13 +406,46 @@ static int clk_rcg2_determine_floor_rate(struct clk_hw *hw,
 	return _freq_tbl_determine_rate(hw, rcg->freq_tbl, req, FLOOR);
 }
 
+static bool clk_rcg2_current_config(struct clk_rcg2 *rcg,
+				    const struct freq_tbl *f)
+{
+	struct clk_hw *hw = &rcg->clkr.hw;
+	u32 cfg, mask, new_cfg;
+	int index;
+
+	if (rcg->mnd_width) {
+		mask = BIT(rcg->mnd_width) - 1;
+		regmap_read(rcg->clkr.regmap, rcg->cmd_rcgr + M_REG, &cfg);
+		if ((cfg & mask) != (f->m & mask))
+			return false;
+
+		regmap_read(rcg->clkr.regmap, rcg->cmd_rcgr + N_REG, &cfg);
+		if ((cfg & mask) != (~(f->n - f->m) & mask))
+			return false;
+	}
+
+	mask = (BIT(rcg->hid_width) - 1) | CFG_SRC_SEL_MASK;
+
+	index = qcom_find_src_index(hw, rcg->parent_map, f->src);
+
+	new_cfg = ((f->pre_div << CFG_SRC_DIV_SHIFT) |
+		(rcg->parent_map[index].cfg << CFG_SRC_SEL_SHIFT)) & mask;
+
+	regmap_read(rcg->clkr.regmap, rcg->cmd_rcgr + CFG_REG, &cfg);
+
+	if (new_cfg != (cfg & mask))
+		return false;
+
+	return true;
+}
+
 static int clk_rcg2_configure(struct clk_rcg2 *rcg, const struct freq_tbl *f)
 {
 	u32 cfg, mask, old_cfg;
 	struct clk_hw *hw = &rcg->clkr.hw;
 	int ret, index = qcom_find_src_index(hw, rcg->parent_map, f->src);
 
-	 /* Skip configuration if DFS control has been enabled for the RCG. */
+	/* Skip configuration if DFS control has been enabled for the RCG. */
 	if (rcg->flags & DFS_ENABLE_RCG)
 		return 0;
 
@@ -428,6 +486,8 @@ static int clk_rcg2_configure(struct clk_rcg2 *rcg, const struct freq_tbl *f)
 	cfg |= rcg->parent_map[index].cfg << CFG_SRC_SEL_SHIFT;
 	if (rcg->mnd_width && f->n && (f->m != f->n))
 		cfg |= CFG_MODE_DUAL_EDGE;
+	if (rcg->flags & HW_CLK_CTRL_MODE)
+		cfg |= CFG_HW_CLK_CTRL_MASK;
 	ret = regmap_update_bits(rcg->clkr.regmap,
 			rcg->cmd_rcgr + rcg->cfg_off + CFG_REG, mask, cfg);
 	if (ret)
@@ -1025,6 +1085,8 @@ static int clk_byte2_set_rate(struct clk_hw *hw, unsigned long rate,
 	for (i = 0; i < num_parents; i++) {
 		if (cfg == rcg->parent_map[i].cfg) {
 			f.src = rcg->parent_map[i].src;
+			if (clk_rcg2_current_config(rcg, &f))
+				return 0;
 			return clk_rcg2_configure(rcg, &f);
 		}
 	}
@@ -1121,6 +1183,8 @@ static int clk_pixel_set_rate(struct clk_hw *hw, unsigned long rate,
 		f.m = frac->num;
 		f.n = frac->den;
 
+		if (clk_rcg2_current_config(rcg, &f))
+			return 0;
 		return clk_rcg2_configure(rcg, &f);
 	}
 	return -EINVAL;
@@ -1482,9 +1546,9 @@ done:
 		"RCG flags %x\n", i, dfs_freq_tbl[i].freq, dfs_freq_tbl[i].src,
 				dfs_freq_tbl[i].pre_div, dfs_freq_tbl[i].m,
 				dfs_freq_tbl[i].n, rcg_flags);
-	 /* Skip the safe configuration if DFS has been enabled for the RCG. */
-	 if (clk->enable_safe_config)
-		 clk->enable_safe_config = false;
+	/* Skip the safe configuration if DFS has been enabled for the RCG. */
+	if (clk->enable_safe_config)
+		clk->enable_safe_config = false;
 	clk->flags |= rcg_flags;
 	clk->freq_tbl = dfs_freq_tbl;
 err:

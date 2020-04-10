@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,7 +15,6 @@
 #include "sde_hw_catalog.h"
 #include "sde_hw_intf.h"
 #include "sde_dbg.h"
-#include "sde_kms.h"
 
 #define INTF_TIMING_ENGINE_EN           0x000
 #define INTF_CONFIG                     0x004
@@ -52,6 +51,7 @@
 #define   INTF_DEFLICKER_STRNG_COEFF    0x0F4
 #define   INTF_DEFLICKER_WEAK_COEFF     0x0F8
 
+#define   INTF_REG_SPLIT_LINK           0x080
 #define   INTF_DSI_CMD_MODE_TRIGGER_EN  0x084
 #define   INTF_PANEL_FORMAT             0x090
 #define   INTF_TPG_ENABLE               0x100
@@ -89,9 +89,6 @@
 #define INTF_TEAR_LINE_COUNT            0x2B0
 #define INTF_TEAR_AUTOREFRESH_CONFIG    0x2B4
 #define INTF_TEAR_TEAR_DETECT_CTRL      0x2B8
-
-#define AVR_CONTINUOUS_MODE   1
-#define AVR_ONE_SHOT_MODE     2
 
 static struct sde_intf_cfg *_intf_offset(enum sde_intf intf,
 		struct sde_mdss_cfg *m,
@@ -136,7 +133,7 @@ static int sde_hw_intf_avr_setup(struct sde_hw_intf *ctx,
 	u32 min_fps, default_fps, diff_fps;
 	u32 vsync_period_slow;
 	u32 avr_vtotal;
-	u32 add_porches;
+	u32 add_porches = 0;
 
 	if (!ctx || !params || !avr_params) {
 		SDE_ERROR("invalid input parameter(s)\n");
@@ -153,7 +150,10 @@ static int sde_hw_intf_avr_setup(struct sde_hw_intf *ctx,
 	vsync_period = params->vsync_pulse_width +
 			params->v_back_porch + params->height +
 			params->v_front_porch;
-	add_porches = mult_frac(vsync_period, diff_fps, min_fps);
+
+	if (diff_fps)
+		add_porches = mult_frac(vsync_period, diff_fps, min_fps);
+
 	vsync_period_slow = vsync_period + add_porches;
 	avr_vtotal = vsync_period_slow * hsync_period;
 
@@ -175,7 +175,8 @@ static void sde_hw_intf_avr_ctrl(struct sde_hw_intf *ctx,
 	c = &ctx->hw;
 	if (avr_params->avr_mode) {
 		avr_ctrl = BIT(0);
-		avr_mode = (avr_params->avr_mode == AVR_ONE_SHOT_MODE) ?
+		avr_mode =
+			(avr_params->avr_mode == SDE_RM_QSYNC_ONE_SHOT_MODE) ?
 			(BIT(0) | BIT(8)) : 0x0;
 	}
 
@@ -198,6 +199,8 @@ static void sde_hw_intf_setup_timing_engine(struct sde_hw_intf *ctx,
 	u32 polarity_ctl, den_polarity, hsync_polarity, vsync_polarity;
 	u32 panel_format;
 	u32 intf_cfg, intf_cfg2;
+	u32 display_data_hctl = 0, active_data_hctl = 0;
+	bool dp_intf = false;
 
 	/* read interface_cfg */
 	intf_cfg = SDE_REG_READ(c, INTF_CONFIG);
@@ -211,13 +214,11 @@ static void sde_hw_intf_setup_timing_engine(struct sde_hw_intf *ctx,
 	display_v_end = ((vsync_period - p->v_front_porch) * hsync_period) +
 	p->hsync_skew - 1;
 
-	if (ctx->cap->type == INTF_EDP || ctx->cap->type == INTF_DP) {
-		display_v_start += p->hsync_pulse_width + p->h_back_porch;
-		display_v_end -= p->h_front_porch;
-	}
-
 	hsync_start_x = p->h_back_porch + p->hsync_pulse_width;
 	hsync_end_x = hsync_period - p->h_front_porch - 1;
+
+	if (ctx->cap->type == INTF_EDP || ctx->cap->type == INTF_DP)
+		dp_intf = true;
 
 	if (p->width != p->xres) {
 		active_h_start = hsync_start_x;
@@ -248,10 +249,36 @@ static void sde_hw_intf_setup_timing_engine(struct sde_hw_intf *ctx,
 	hsync_ctl = (hsync_period << 16) | p->hsync_pulse_width;
 	display_hctl = (hsync_end_x << 16) | hsync_start_x;
 
+	if (dp_intf) {
+		active_h_start = hsync_start_x;
+		active_h_end = active_h_start + p->xres - 1;
+		active_v_start = display_v_start;
+		active_v_end = active_v_start + (p->yres * hsync_period) - 1;
+
+		display_v_start += p->hsync_pulse_width + p->h_back_porch;
+
+		active_hctl = (active_h_end << 16) | active_h_start;
+		display_hctl = active_hctl;
+	}
+
+	intf_cfg2 = 0;
+
+	if (dp_intf && p->compression_en) {
+		active_data_hctl = (hsync_start_x + p->extra_dto_cycles) << 16;
+		active_data_hctl += hsync_start_x;
+
+		display_data_hctl = active_data_hctl;
+
+		intf_cfg2 |= BIT(4);
+	}
+
 	den_polarity = 0;
 	if (ctx->cap->type == INTF_HDMI) {
 		hsync_polarity = p->yres >= 720 ? 0 : 1;
 		vsync_polarity = p->yres >= 720 ? 0 : 1;
+	} else if (ctx->cap->type == INTF_DP) {
+		hsync_polarity = p->hsync_polarity;
+		vsync_polarity = p->vsync_polarity;
 	} else {
 		hsync_polarity = 0;
 		vsync_polarity = 0;
@@ -272,9 +299,11 @@ static void sde_hw_intf_setup_timing_engine(struct sde_hw_intf *ctx,
 				(COLOR_8BIT << 4) |
 				(0x21 << 8));
 
-	intf_cfg2 = 0;
 	if (p->wide_bus_en)
 		intf_cfg2 |= BIT(0);
+
+	if (ctx->cfg.split_link_en)
+		SDE_REG_WRITE(c, INTF_REG_SPLIT_LINK, 0x3);
 
 	SDE_REG_WRITE(c, INTF_HSYNC_CTL, hsync_ctl);
 	SDE_REG_WRITE(c, INTF_VSYNC_PERIOD_F0, vsync_period * hsync_period);
@@ -294,6 +323,8 @@ static void sde_hw_intf_setup_timing_engine(struct sde_hw_intf *ctx,
 	SDE_REG_WRITE(c, INTF_CONFIG, intf_cfg);
 	SDE_REG_WRITE(c, INTF_PANEL_FORMAT, panel_format);
 	SDE_REG_WRITE(c, INTF_CONFIG2, intf_cfg2);
+	SDE_REG_WRITE(c, INTF_DISPLAY_DATA_HCTL, display_data_hctl);
+	SDE_REG_WRITE(c, INTF_ACTIVE_DATA_HCTL, active_data_hctl);
 }
 
 static void sde_hw_intf_enable_timing_engine(
@@ -367,7 +398,13 @@ static void sde_hw_intf_bind_pingpong_blk(
 	if (enable)
 		mux_cfg |= (pp - PINGPONG_0) & 0x7;
 	else
-		mux_cfg |= 0xf;
+		mux_cfg = 0xf000f;
+
+	if (intf->cfg.split_link_en)
+		mux_cfg = 0x60000;
+
+	if (intf->cfg.pp_slave_intf)
+		mux_cfg = 0x6;
 
 	SDE_REG_WRITE(c, INTF_MUX, mux_cfg);
 }

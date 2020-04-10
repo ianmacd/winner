@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -172,7 +172,7 @@ static DEVICE_ATTR(__attr, 0644, show_list_##__attr, store_list_##__attr)
 #define MAX_MS	500U
 
 /* Returns MBps of read/writes for the sampling window. */
-static unsigned int bytes_to_mbps(long long bytes, unsigned int us)
+static unsigned long bytes_to_mbps(unsigned long long bytes, unsigned int us)
 {
 	bytes *= USEC_PER_SEC;
 	do_div(bytes, us);
@@ -617,7 +617,8 @@ static int gov_start(struct devfreq *df)
 	node->orig_data = df->data;
 	df->data = node;
 
-	if (start_monitor(df, true))
+	ret = start_monitor(df, true);
+	if (ret)
 		goto err_start;
 
 	ret = sysfs_create_group(&df->dev.kobj, node->attr_grp);
@@ -689,11 +690,6 @@ static int gov_resume(struct devfreq *df)
 
 	if (!node->hw->resume_hwmon)
 		return -EPERM;
-
-	if (!node->resume_freq) {
-		dev_warn(df->dev.parent, "Governor already resumed!\n");
-		return -EBUSY;
-	}
 
 	mutex_lock(&df->lock);
 	update_devfreq(df);

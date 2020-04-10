@@ -728,8 +728,10 @@ static irqreturn_t geni_ir_interrupt(int irq, void *data)
 		} else {
 			/*NEC*/
 			scancode = (rx_data & 0x0000FF);
-			address2 = (rx_data & 0x00FF00);
-			address1 = (rx_data & 0xFF0000);
+			scancode = ~scancode;
+			scancode = (scancode & 0x0000FF);
+			address2 = (rx_data & 0x00FF0000);
+			address1 = (rx_data & 0xFF000000);
 			rc_keydown(ir->rcdev, RC_PROTO_NEC, scancode, 0);
 		}
 
@@ -856,7 +858,7 @@ static int msm_geni_ir_get_res(struct platform_device *pdev,
 		pr_err("ioremap failed\n");
 		return -ENOMEM;
 	}
-	pr_debug("ir->base: 0x%x\n", ir->base);
+	pr_debug("ir->base: 0x%lx\n", (unsigned long int)ir->base);
 	ir->ahb_clk = clk_get(&pdev->dev, "iface_clk");
 	ir->serial_clk = clk_get(&pdev->dev, "serial_clk");
 	if (IS_ERR(ir->ahb_clk)) {

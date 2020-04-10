@@ -731,6 +731,7 @@ static int usb_audio_probe(struct usb_interface *intf,
 	err = snd_card_register(chip->card);
 	if (err < 0)
 		goto __error;
+	pr_info("%s : card %d is registered.\n", __func__, chip->card->number);
 
 	usb_chip[chip->index] = chip;
 	chip->num_interfaces++;
@@ -742,6 +743,7 @@ static int usb_audio_probe(struct usb_interface *intf,
 	return 0;
 
  __error:
+	pr_info("%s : card probe fail.\n", __func__);
 	if (chip) {
 		/* chip->active is inside the chip->card object,
 		 * decrement before memory is possibly returned.
@@ -764,6 +766,7 @@ static void usb_audio_disconnect(struct usb_interface *intf)
 	struct snd_card *card;
 	struct list_head *p;
 
+	pr_info("%s : disconnect!\n", __func__);
 	if (chip == (void *)-1L)
 		return;
 

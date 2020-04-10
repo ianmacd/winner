@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -167,12 +167,35 @@ static int dp_parser_misc(struct dp_parser *parser)
 	if (data && (len == DP_MAX_PHY_LN)) {
 		for (i = 0; i < len; i++)
 			parser->l_map[i] = data[i];
+	} else {
+		pr_debug("Incorrect mapping, configure default\n");
+		parser->l_map[0] = DP_PHY_LN0;
+		parser->l_map[1] = DP_PHY_LN1;
+		parser->l_map[2] = DP_PHY_LN2;
+		parser->l_map[3] = DP_PHY_LN3;
+	}
+
+	data = of_get_property(of_node, "qcom,pn-swap-lane-map", &len);
+	if (data && (len == DP_MAX_PHY_LN)) {
+		for (i = 0; i < len; i++)
+			parser->l_pnswap |= (data[i] & 0x01) << i;
 	}
 
 	rc = of_property_read_u32(of_node,
 		"qcom,max-pclk-frequency-khz", &parser->max_pclk_khz);
 	if (rc)
 		parser->max_pclk_khz = DP_MAX_PIXEL_CLK_KHZ;
+
+	rc = of_property_read_u32(of_node,
+		"qcom,max-lclk-frequency-khz", &parser->max_lclk_khz);
+	if (rc)
+		parser->max_lclk_khz = DP_MAX_LINK_CLK_KHZ;
+
+	rc = of_property_read_u32(of_node,
+		"qcom,max-hdisplay", &parser->max_hdisplay);
+
+	rc = of_property_read_u32(of_node,
+		"qcom,max-vdisplay", &parser->max_vdisplay);
 
 	return 0;
 }
@@ -205,7 +228,6 @@ static int dp_parser_msm_hdcp_dev(struct dp_parser *parser)
 
 static int dp_parser_pinctrl(struct dp_parser *parser)
 {
-	int rc = 0;
 	struct dp_pinctrl *pinctrl = &parser->pinctrl;
 
 	pr_debug("+++\n");
@@ -213,28 +235,43 @@ static int dp_parser_pinctrl(struct dp_parser *parser)
 	pinctrl->pin = devm_pinctrl_get(&parser->pdev->dev);
 
 	if (IS_ERR_OR_NULL(pinctrl->pin)) {
-		rc = PTR_ERR(pinctrl->pin);
-		pr_err("failed to get pinctrl, rc=%d\n", rc);
-		goto error;
+		pr_debug("failed to get pinctrl\n");
+		return 0;
+	}
+
+	if (parser->no_aux_switch && parser->lphw_hpd) {
+		pinctrl->state_hpd_tlmm = pinctrl->state_hpd_ctrl = NULL;
+
+		pinctrl->state_hpd_tlmm = pinctrl_lookup_state(pinctrl->pin,
+					"mdss_dp_hpd_tlmm");
+		if (!IS_ERR_OR_NULL(pinctrl->state_hpd_tlmm)) {
+			pinctrl->state_hpd_ctrl = pinctrl_lookup_state(
+				pinctrl->pin, "mdss_dp_hpd_ctrl");
+		}
+
+		if (IS_ERR_OR_NULL(pinctrl->state_hpd_tlmm) ||
+				IS_ERR_OR_NULL(pinctrl->state_hpd_ctrl)) {
+			pinctrl->state_hpd_tlmm = NULL;
+			pinctrl->state_hpd_ctrl = NULL;
+			pr_debug("tlmm or ctrl pinctrl state does not exist\n");
+		}
 	}
 
 	pinctrl->state_active = pinctrl_lookup_state(pinctrl->pin,
 					"mdss_dp_active");
 	if (IS_ERR_OR_NULL(pinctrl->state_active)) {
-		rc = PTR_ERR(pinctrl->state_active);
-		pr_err("failed to get pinctrl active state, rc=%d\n", rc);
-		goto error;
+		pinctrl->state_active = NULL;
+		pr_debug("failed to get pinctrl active state\n");
 	}
 
 	pinctrl->state_suspend = pinctrl_lookup_state(pinctrl->pin,
 					"mdss_dp_sleep");
 	if (IS_ERR_OR_NULL(pinctrl->state_suspend)) {
-		rc = PTR_ERR(pinctrl->state_suspend);
-		pr_err("failed to get pinctrl suspend state, rc=%d\n", rc);
-		goto error;
+		pinctrl->state_suspend = NULL;
+		pr_debug("failed to get pinctrl suspend state\n");
 	}
-error:
-	return rc;
+
+	return 0;
 }
 
 static int dp_parser_gpio(struct dp_parser *parser)
@@ -253,9 +290,13 @@ static int dp_parser_gpio(struct dp_parser *parser)
 
 	if (of_find_property(of_node, "qcom,dp-hpd-gpio", NULL)) {
 		parser->no_aux_switch = true;
+		parser->lphw_hpd = of_find_property(of_node,
+				"qcom,dp-low-power-hw-hpd", NULL);
 		return 0;
 	}
 
+	if (of_find_property(of_node, "qcom,dp-gpio-aux-switch", NULL))
+		parser->gpio_aux_switch = true;
 	mp->gpio_config = devm_kzalloc(dev,
 		sizeof(struct dss_gpio) * ARRAY_SIZE(dp_gpios), GFP_KERNEL);
 	if (!mp->gpio_config)
@@ -269,6 +310,10 @@ static int dp_parser_gpio(struct dp_parser *parser)
 
 		if (!gpio_is_valid(mp->gpio_config[i].gpio)) {
 			pr_debug("%s gpio not specified\n", dp_gpios[i]);
+			/* In case any gpio was not specified, we think gpio
+			 * aux switch also was not specified.
+			 */
+			parser->gpio_aux_switch = false;
 			continue;
 		}
 
@@ -726,30 +771,75 @@ static int dp_parser_catalog(struct dp_parser *parser)
 static int dp_parser_mst(struct dp_parser *parser)
 {
 	struct device *dev = &parser->pdev->dev;
+	int i;
 
 	parser->has_mst = of_property_read_bool(dev->of_node,
 			"qcom,mst-enable");
+	parser->no_mst_encoder = of_property_read_bool(dev->of_node,
+			"qcom,no-mst-encoder");
 #ifndef SECDP_USE_MST
 	parser->has_mst = false;
+	parser->no_mst_encoder = true;
 	pr_debug("[secdp] mst disable!\n");
 #endif
 	parser->has_mst_sideband = parser->has_mst;
 
 	pr_debug("mst parsing successful. mst:%d\n", parser->has_mst);
 
+	for (i = 0; i < MAX_DP_MST_STREAMS; i++) {
+		of_property_read_u32_index(dev->of_node,
+				"qcom,mst-fixed-topology-ports", i,
+				&parser->mst_fixed_port[i]);
+	}
+
 	return 0;
 }
 
-static int dp_parser_widebus(struct dp_parser *parser)
+static void dp_parser_dsc(struct dp_parser *parser)
+{
+	int rc;
+	struct device *dev = &parser->pdev->dev;
+
+	parser->dsc_feature_enable = of_property_read_bool(dev->of_node,
+			"qcom,dsc-feature-enable");
+
+	rc = of_property_read_u32(dev->of_node,
+		"qcom,max-dp-dsc-blks", &parser->max_dp_dsc_blks);
+	if (rc || !parser->max_dp_dsc_blks)
+		parser->dsc_feature_enable = false;
+
+	rc = of_property_read_u32(dev->of_node,
+		"qcom,max-dp-dsc-input-width-pixs",
+		&parser->max_dp_dsc_input_width_pixs);
+	if (rc || !parser->max_dp_dsc_input_width_pixs)
+		parser->dsc_feature_enable = false;
+
+	pr_debug("dsc parsing successful. dsc:%d, blks:%d, width:%d\n",
+			parser->dsc_feature_enable,
+			parser->max_dp_dsc_blks,
+			parser->max_dp_dsc_input_width_pixs);
+}
+
+static void dp_parser_fec(struct dp_parser *parser)
+{
+	struct device *dev = &parser->pdev->dev;
+
+	parser->fec_feature_enable = of_property_read_bool(dev->of_node,
+			"qcom,fec-feature-enable");
+
+	pr_debug("fec parsing successful. fec:%d\n",
+			parser->fec_feature_enable);
+}
+
+static void dp_parser_widebus(struct dp_parser *parser)
 {
 	struct device *dev = &parser->pdev->dev;
 
 	parser->has_widebus = of_property_read_bool(dev->of_node,
 			"qcom,widebus-enable");
 
-	pr_debug("widebus parsing successful. dsc:%d\n", parser->has_widebus);
-
-	return 0;
+	pr_debug("widebus parsing successful. widebus:%d\n",
+			parser->has_widebus);
 }
 
 #ifdef CONFIG_SEC_DISPLAYPORT
@@ -760,9 +850,16 @@ static void secdp_parse_misc(struct dp_parser *parser)
 	const char* data;
 	int len = 0;
 
+	parser->cc_dir_inv = of_property_read_bool(dev->of_node, "secdp,cc-dir-inv");
+	pr_debug("secdp,cc-dir-inv: %d\n", parser->cc_dir_inv);
+
 	parser->aux_sel_inv = of_property_read_bool(dev->of_node,
 			"secdp,aux-sel-inv");
-	pr_debug("secdp,aux-sel-inv: %d\n",	parser->aux_sel_inv);
+	pr_debug("secdp,aux-sel-inv: %d\n", parser->aux_sel_inv);
+
+	parser->aux_sw_redrv = of_property_read_bool(dev->of_node,
+			"secdp,aux-sw-redrv");
+	pr_debug("secdp,aux-sw-redrv: %d\n", parser->aux_sw_redrv);
 
 	data = of_get_property(of_node, "secdp,dex-dft-res", &len);
 	if (data) {
@@ -771,6 +868,10 @@ static void secdp_parse_misc(struct dp_parser *parser)
 	}
 	pr_debug("secdp,dex-dft-res: %s, %s\n", data,
 		secdp_dex_res_to_string(parser->dex_dft_res));
+
+	parser->prefer_res = of_property_read_bool(dev->of_node,
+			"secdp,prefer-res");
+	pr_debug("secdp,prefer-res: %d\n", parser->prefer_res);
 
 	return;
 }
@@ -828,8 +929,9 @@ static int dp_parser_parse(struct dp_parser *parser)
 	if (rc)
 		goto err;
 
-	rc = dp_parser_widebus(parser);
-
+	dp_parser_dsc(parser);
+	dp_parser_fec(parser);
+	dp_parser_widebus(parser);
 #ifdef CONFIG_SEC_DISPLAYPORT
 	secdp_parse_misc(parser);
 #endif

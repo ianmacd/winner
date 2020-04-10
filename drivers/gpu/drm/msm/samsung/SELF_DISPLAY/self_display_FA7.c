@@ -1236,6 +1236,11 @@ static ssize_t self_display_write(struct file *file, const char __user *buf,
 		return -EINVAL;
 	}
 
+	if (count <= IMAGE_HEADER_SIZE) {
+		LCD_ERR("Invalid Buffer Size (%d)\n", (int)count);
+		return -EINVAL;
+	}
+
 	/*
 	 * get 2byte flas to distinguish what operation is passing
 	 */
@@ -1401,8 +1406,8 @@ int self_display_init_FA7(struct samsung_display_driver_data *vdd)
 
 	vdd->self_disp.aod_enter = self_display_aod_enter;
 	vdd->self_disp.aod_exit = self_display_aod_exit;
-	vdd->self_disp.self_mask_img_write= self_mask_img_write;
-	vdd->self_disp.self_mask_on= self_mask_on;
+	vdd->self_disp.self_mask_img_write = self_mask_img_write;
+	vdd->self_disp.self_mask_on = self_mask_on;
 	vdd->self_disp.self_mask_check = self_mask_check;
 	vdd->self_disp.self_move_set = self_move_on;
 	vdd->self_disp.self_icon_set = self_icon_set;

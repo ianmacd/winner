@@ -332,7 +332,7 @@ dma_addr_t msm_gem_get_dma_addr(struct drm_gem_object *obj)
 		sgt = dma_buf_map_attachment(obj->import_attach,
 						DMA_BIDIRECTIONAL);
 		if (IS_ERR_OR_NULL(sgt)) {
-			DRM_ERROR("dma_buf_map_attachment failure, err=%d\n",
+			DRM_ERROR("dma_buf_map_attachment failure, err=%ld\n",
 					PTR_ERR(sgt));
 			return 0;
 		}
@@ -493,7 +493,7 @@ int msm_gem_get_iova(struct drm_gem_object *obj,
 			SDE_EVT32(obj->import_attach->dev, 0x1111, msm_obj->sgt,
 					phys_addr, dmabuf, aspace);
 		}
-		
+
 		ret = msm_gem_map_vma(aspace, vma, msm_obj->sgt,
 				obj->size >> PAGE_SHIFT,
 				msm_obj->flags);

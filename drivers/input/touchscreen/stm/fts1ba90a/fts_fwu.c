@@ -35,7 +35,10 @@ struct fts_header {
 	u32	cfg_ver;
 	u32	reserved1[2];
 	u32	ext_release_ver;
-	u32	reserved2[1];
+	u8	project_id;
+	u8	ic_name;
+	u8	module_ver;
+	u8	reserved2;
 	u32	sec0_size;
 	u32	sec1_size;
 	u32	sec2_size;
@@ -638,12 +641,19 @@ int fts_fw_update_on_probe(struct fts_ts_info *info)
 	info->fw_version_of_bin = (u16)header->fw_ver;
 	info->fw_main_version_of_bin = (u16)header->ext_release_ver;
 	info->config_version_of_bin = (u16)header->cfg_ver;
+	info->project_id_of_bin = header->project_id;
+	info->ic_name_of_bin = header->ic_name;
+	info->module_version_of_bin = header->module_ver;
 
 	input_info(true, &info->client->dev,
 			"%s: [BIN] Firmware Ver: 0x%04X, Config Ver: 0x%04X, Main Ver: 0x%04X\n", __func__,
 			info->fw_version_of_bin,
 			info->config_version_of_bin,
 			info->fw_main_version_of_bin);
+	input_info(true, &info->client->dev,
+			"%s: [BIN] Project ID: 0x%02X, IC Name: 0x%02X, Module Ver: 0x%02X\n",
+			__func__, info->project_id_of_bin,
+			info->ic_name_of_bin, info->module_version_of_bin);
 
 	if (info->board->bringup == 2) {
 		input_err(true, &info->client->dev, "%s: skip fw_update for bringup\n", __func__);
@@ -653,6 +663,12 @@ int fts_fw_update_on_probe(struct fts_ts_info *info)
 
 	if (info->checksum_result)
 		retval = FTS_NEED_FW_UPDATE;
+	else if (info->ic_name_of_ic != info->ic_name_of_bin)
+		retval = FTS_NOT_UPDATE;
+	else if (info->project_id_of_ic != info->project_id_of_bin)
+		retval = FTS_NEED_FW_UPDATE;
+	else if (info->module_version_of_ic != info->module_version_of_bin)
+		retval = FTS_NOT_UPDATE;
 	else if ((info->fw_main_version_of_ic < info->fw_main_version_of_bin)
 			|| ((info->config_version_of_ic < info->config_version_of_bin))
 			|| ((info->fw_version_of_ic < info->fw_version_of_bin)))

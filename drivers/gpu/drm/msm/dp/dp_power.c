@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -214,17 +214,28 @@ error:
 
 static int dp_power_pinctrl_set(struct dp_power_private *power, bool active)
 {
-	int rc = -EFAULT;
+	int rc = 0;
 	struct pinctrl_state *pin_state;
 	struct dp_parser *parser;
 
 	parser = power->parser;
 
-	if (parser && parser->no_aux_switch)
+	if (IS_ERR_OR_NULL(parser->pinctrl.pin) || power->dp_power.sim_mode)
 		return 0;
 
-	if (IS_ERR_OR_NULL(parser->pinctrl.pin))
-		return PTR_ERR(parser->pinctrl.pin);
+	if (parser->no_aux_switch && parser->lphw_hpd) {
+		pin_state = active ? parser->pinctrl.state_hpd_ctrl
+				: parser->pinctrl.state_hpd_tlmm;
+		if (!IS_ERR_OR_NULL(pin_state)) {
+			rc = pinctrl_select_state(parser->pinctrl.pin,
+				pin_state);
+			if (rc) {
+				pr_err("cannot direct hpd line to %s\n",
+					active ? "ctrl" : "tlmm");
+				return rc;
+			}
+		}
+	}
 
 	pin_state = active ? parser->pinctrl.state_active
 				: parser->pinctrl.state_suspend;
@@ -235,10 +246,6 @@ static int dp_power_pinctrl_set(struct dp_power_private *power, bool active)
 			pr_err("can not set %s pins\n",
 			       active ? "dp_active"
 			       : "dp_sleep");
-	} else {
-		pr_err("invalid '%s' pinstate\n",
-		       active ? "dp_active"
-		       : "dp_sleep");
 	}
 
 	return rc;
@@ -464,12 +471,15 @@ static int dp_power_clk_enable(struct dp_power *dp_power,
 	else if (pm_type == DP_LINK_PM)
 		power->link_clks_on = enable;
 
-	pr_debug("%s clocks for %s\n",
-			enable ? "enable" : "disable",
-			dp_parser_pm_name(pm_type));
-	pr_debug("link_clks:%s core_clks:%s strm0_clks:%s strm1_clks:%s\n",
-		power->link_clks_on ? "on" : "off",
+	/*
+	 * This log is printed only when user connects or disconnects
+	 * a DP cable. As this is a user-action and not a frequent
+	 * usecase, it is not going to flood the kernel logs. Also,
+	 * helpful in debugging the NOC issues.
+	 */
+	pr_info("core:%s link:%s strm0:%s strm1:%s\n",
 		power->core_clks_on ? "on" : "off",
+		power->link_clks_on ? "on" : "off",
 		power->strm0_clks_on ? "on" : "off",
 		power->strm1_clks_on ? "on" : "off");
 error:
@@ -660,7 +670,9 @@ static void secdp_power_set_gpio(bool flip)
 
 	parser = power->parser;
 
-	pr_debug("+++, flip(%d), aux_sel_inv(%d)\n", flip, parser->aux_sel_inv);
+	pr_debug("+++, flip(%d), aux_sel_inv(%d), aux_sw_redrv(%d)\n", flip,
+		parser->aux_sel_inv, parser->aux_sw_redrv);
+
 	if (parser->aux_sel_inv)
 		sel_val = true;
 
@@ -684,11 +696,11 @@ static void secdp_power_set_gpio(bool flip)
 	for (i = 0; i < mp->num_gpio; i++) {
 		if (gpio_is_valid(config->gpio)) {
 			if (dp_power_find_gpio(config->gpio_name, "aux-sel")) {
-#if 1//ndef CONFIG_COMBO_REDRIVER_PTN36502
-				gpio_direction_output(config->gpio, (flip == false)/*(dir == 0)*/ ? sel_val : !sel_val);
-#else
-				gpio_direction_output(config->gpio, 0);
-#endif
+				if (!parser->aux_sw_redrv)
+					gpio_direction_output(config->gpio, (!flip ? sel_val : !sel_val));
+				else
+					gpio_direction_output(config->gpio, 0);
+
 				usleep_range(100, 120);
 				pr_info("%s -> set %d\n", config->gpio_name, gpio_get_value(config->gpio));
 				break;
@@ -751,10 +763,16 @@ static void secdp_power_unset_gpio(void)
  */
 void secdp_config_gpios_factory(int aux_sel, bool on)
 {
-	pr_debug("%s (%d,%d)\n", __func__, aux_sel, on);
+	struct dp_power_private *power = g_secdp_power;
+	struct dp_parser *parser;
+
+	pr_debug("+++ (%d,%d)\n", aux_sel, on);
+
+	parser = power->parser;
 
 	if (on) {
 		secdp_aux_pullup_vreg_enable(true);
+		secdp_power_set_gpio(aux_sel);
 
 #ifdef CONFIG_COMBO_REDRIVER_PTN36502
 		if (aux_sel == 1)
@@ -763,18 +781,12 @@ void secdp_config_gpios_factory(int aux_sel, bool on)
 			secdp_redriver_aux_ctrl(REDRIVER_SWITCH_THROU);
 		else
 			pr_err("unknown <%d>\n", aux_sel);
-#else
-		/* set aux_sel, aux_en */
-		secdp_power_set_gpio(aux_sel);
 #endif
 	} else {
 #ifdef CONFIG_COMBO_REDRIVER_PTN36502
 		secdp_redriver_aux_ctrl(REDRIVER_SWITCH_RESET);
-#else
-		/* unset aux_sel, aux_en */
-		secdp_power_unset_gpio();
 #endif
-
+		secdp_power_unset_gpio();
 		secdp_aux_pullup_vreg_enable(false);
 	}
 }
@@ -785,12 +797,18 @@ enum plug_orientation secdp_get_plug_orientation(void)
 	struct dp_power_private *power = g_secdp_power;
 	struct dss_module_power *mp = &power->parser->mp[DP_CORE_PM];
 	struct dss_gpio *config = mp->gpio_config;
+	struct dp_parser *parser;
+
+	parser = power->parser;
+	pr_info("+++ cc_dir_inv: %d\n", parser->cc_dir_inv);
 
 	for (i = 0; i < mp->num_gpio; i++) {
 		if (gpio_is_valid(config->gpio)) {
 			if (dp_power_find_gpio(config->gpio_name, "usbplug-cc")) {
 				dir = gpio_get_value(config->gpio);
-				pr_info("orientation: %s\n", (dir == 0) ? "CC1" : "CC2");
+				if (parser->cc_dir_inv)
+					dir = !dir;
+				pr_info("orientation: %s\n", !dir ? "CC1" : "CC2");
 				if (dir == 0)
 					return ORIENTATION_CC1;
 				else /* if (dir == 1) */
@@ -802,6 +820,32 @@ enum plug_orientation secdp_get_plug_orientation(void)
 
 	/*cannot be here*/
 	return ORIENTATION_NONE;
+}
+
+bool secdp_get_clk_status(enum dp_pm_type type)
+{
+	struct dp_power_private *power = g_secdp_power;
+	bool ret = false;
+
+	switch (type) {
+	case DP_CORE_PM:
+		ret = power->core_clks_on;
+		break;
+	case DP_STREAM0_PM:
+		ret = power->strm0_clks_on;
+		break;
+	case DP_STREAM1_PM:
+		ret = power->strm1_clks_on;
+		break;
+	case DP_LINK_PM:
+		ret = power->link_clks_on;
+		break;
+	default:
+		pr_err("invalid type:%d\n", type);
+		break;
+	}
+
+	return ret;
 }
 #endif
 

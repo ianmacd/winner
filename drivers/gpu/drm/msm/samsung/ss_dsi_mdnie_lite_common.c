@@ -786,7 +786,6 @@ static ssize_t whiteRGB_store(struct device *dev,
 		}
 	}
 
-
 	if (!ss_is_ready_to_send_cmd(vdd)) {
 		LCD_ERR("Panel is not ready. Panel State(%d)\n", vdd->panel_state);
 		return size;
@@ -919,6 +918,9 @@ static ssize_t night_mode_store(struct device *dev,
 
 	if (((idx >= 0) && (idx < mdnie_data->dsi_max_night_mode_index)) && (enable == true)) {
 		if (!IS_ERR_OR_NULL(mdnie_data->dsi_night_mode_table)) {
+			if(tune->mdnie_mode != AUTO_MODE){
+				idx += mdnie_data->dsi_max_night_mode_index;
+			}
 			buffer = &mdnie_data->dsi_night_mode_table[(MDNIE_SCR_CMD_SIZE * idx)];
 			if (!IS_ERR_OR_NULL(mdnie_data->DSI_NIGHT_MODE_MDNIE_SCR)) {
 				memcpy(&mdnie_data->DSI_NIGHT_MODE_MDNIE_SCR[mdnie_data->mdnie_color_blinde_cmd_offset],

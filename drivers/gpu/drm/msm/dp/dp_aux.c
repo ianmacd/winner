@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -347,7 +347,7 @@ static void dp_aux_reconfig(struct dp_aux *dp_aux)
 	aux->catalog->reset(aux->catalog);
 }
 
-static void dp_aux_abort_transaction(struct dp_aux *dp_aux)
+static void dp_aux_abort_transaction(struct dp_aux *dp_aux, bool reset)
 {
 	struct dp_aux_private *aux;
 
@@ -360,7 +360,7 @@ static void dp_aux_abort_transaction(struct dp_aux *dp_aux)
 
 	aux = container_of(dp_aux, struct dp_aux_private, dp_aux);
 
-	atomic_set(&aux->aborted, 1);
+	atomic_set(&aux->aborted, !reset);
 }
 
 static void dp_aux_update_offset_and_segment(struct dp_aux_private *aux,
@@ -535,8 +535,8 @@ static ssize_t dp_aux_transfer_debug(struct drm_dp_aux *drm_aux,
 	}
 
 	if ((msg->address + msg->size) > SZ_4K) {
-		pr_err("invalid dpcd access: addr=0x%x, size=0x%x\n",
-				msg->address + msg->size);
+		pr_debug("invalid dpcd access: addr=0x%x, size=0x%lx\n",
+				msg->address, msg->size);
 		goto address_error;
 	}
 
@@ -550,7 +550,8 @@ static ssize_t dp_aux_transfer_debug(struct drm_dp_aux *drm_aux,
 		if (aux->read) {
 			timeout = wait_for_completion_timeout(&aux->comp, HZ);
 			if (!timeout) {
-				pr_err("aux timeout for 0x%x\n", msg->address);
+				pr_err("read timeout 0x%x\n", msg->address);
+				atomic_set(&aux->aborted, 1);
 				ret = -ETIMEDOUT;
 				goto end;
 			}
@@ -563,7 +564,8 @@ static ssize_t dp_aux_transfer_debug(struct drm_dp_aux *drm_aux,
 
 			timeout = wait_for_completion_timeout(&aux->comp, HZ);
 			if (!timeout) {
-				pr_err("aux timeout for 0x%x\n", msg->address);
+				pr_err("write timeout 0x%x\n", msg->address);
+				atomic_set(&aux->aborted, 1);
 				ret = -ETIMEDOUT;
 				goto end;
 			}
@@ -599,6 +601,8 @@ address_error:
 	memset(msg->buffer, 0, msg->size);
 	ret = msg->size;
 end:
+	if (ret == -ETIMEDOUT)
+		aux->dp_aux.state |= DP_STATE_AUX_TIMEOUT;
 	aux->dp_aux.reg = 0xFFFF;
 	aux->dp_aux.read = true;
 	aux->dp_aux.size = 0;
@@ -815,10 +819,12 @@ static void dp_aux_set_sim_mode(struct dp_aux *dp_aux, bool en,
 	aux->edid = edid;
 	aux->dpcd = dpcd;
 
-	if (en)
+	if (en) {
+		atomic_set(&aux->aborted, 0);
 		aux->drm_aux.transfer = dp_aux_transfer_debug;
-	else
+	} else {
 		aux->drm_aux.transfer = dp_aux_transfer;
+	}
 
 	mutex_unlock(&aux->mutex);
 }
@@ -949,7 +955,9 @@ struct dp_aux *dp_aux_get(struct device *dev, struct dp_catalog_aux *catalog,
 
 #ifndef CONFIG_SEC_DISPLAYPORT
 	if (!catalog || !parser ||
-			(!parser->no_aux_switch && !aux_switch)) {
+			(!parser->no_aux_switch &&
+				!aux_switch &&
+				!parser->gpio_aux_switch)) {
 		pr_err("invalid input\n");
 		rc = -ENODEV;
 		goto error;

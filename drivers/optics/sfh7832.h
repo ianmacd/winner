@@ -48,7 +48,7 @@
 #include <linux/of_gpio.h>
 #endif
 
-#define HEADER_VERSION		"16"
+#define HEADER_VERSION		"17"
 
 #define PWR_ON		1
 #define PWR_OFF		0
@@ -771,7 +771,7 @@ struct sfh7832_device_data {
 	s32 pin_hrm_int;
 	s32 pin_hrm_en;
 	s32 hrm_irq;
-	u8 irq_state;
+	atomic_t irq_state;
 	u32 led_current;
 	u32 xtalk_code;
 	s32 hrm_threshold;

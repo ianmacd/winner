@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,7 +45,6 @@ const char *gmu_core_oob_type_str(enum oob_request req)
 	struct oob_entry table[] =  {
 			{ oob_gpu, "oob_gpu"},
 			{ oob_perfcntr, "oob_perfcntr"},
-			{ oob_preempt, "oob_preempt"},
 			{ oob_boot_slumber, "oob_boot_slumber"},
 			{ oob_dcvs, "oob_dcvs"},
 	};
@@ -109,7 +108,7 @@ bool gmu_core_isenabled(struct kgsl_device *device)
 
 bool gmu_core_gpmu_isenabled(struct kgsl_device *device)
 {
-	return test_bit(GMU_GPMU, &device->gmu_core.flags);
+	return test_bit(GMU_GPMU, &device->gmu_core.flags) && !nogmu;
 }
 
 bool gmu_core_scales_bandwidth(struct kgsl_device *device)
@@ -244,6 +243,22 @@ void gmu_core_regwrite(struct kgsl_device *device, unsigned int offsetwords,
 	__raw_writel(value, reg);
 }
 
+void gmu_core_blkwrite(struct kgsl_device *device, unsigned int offsetwords,
+		const void *buffer, size_t size)
+{
+	void __iomem *base;
+
+	if (!gmu_core_is_register_offset(device, offsetwords)) {
+		WARN(1, "Out of bounds register write: 0x%x\n", offsetwords);
+		return;
+	}
+
+	offsetwords -= device->gmu_core.gmu2gpu_offset;
+	base = device->gmu_core.reg_virt + (offsetwords << 2);
+
+	memcpy_toio(base, buffer, size);
+}
+
 void gmu_core_regrmw(struct kgsl_device *device,
 		unsigned int offsetwords,
 		unsigned int mask, unsigned int bits)
@@ -259,3 +274,14 @@ void gmu_core_regrmw(struct kgsl_device *device,
 	val &= ~mask;
 	gmu_core_regwrite(device, offsetwords, val | bits);
 }
+
+bool gmu_core_is_initialized(struct kgsl_device *device)
+{
+	struct gmu_core_ops *gmu_core_ops = GMU_CORE_OPS(device);
+
+	if (gmu_core_ops && gmu_core_ops->is_initialized)
+		return gmu_core_ops->is_initialized(device);
+
+	return false;
+}
+

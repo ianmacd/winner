@@ -19,13 +19,6 @@ Main node properties:
   Value type: <u32>
   Definition: Maximum timeout in ms wait for state and cmd completion
 
-- mhi,time-sync
-  Usage: optional
-  Value type: <bool>
-  Definition: Set true, if the external device support MHI get time
-	feature for time synchronization between host processor and
-	external modem.
-
 - mhi,use-bb
   Usage: optional
   Value type: <bool>
@@ -104,6 +97,8 @@ mhi channel node properties:
 	1 = accept skb
 	2 = accept scatterlist
 	3 = offload channel, does not accept any transfer type
+	4 = accept pre-mapped buffers
+	5 = rsc channel type, accept pre-mapped buffers
 
 - mhi,doorbell-mode
   Usage: required
@@ -144,6 +139,19 @@ mhi channel node properties:
   Definition: MHI host driver to automatically start channels once mhi device
 	driver probe is complete. This should be only set true if initial
 	handshake iniaitead by external modem.
+
+- mhi,wake-capable
+  Usage: optional
+  Value type: <bool>
+  Definition: Time sensitive data channel, host should process all pending data
+	before system suspend.
+
+- mhi,chan-type
+  Usage: optional
+  Value type: <u32>
+  Definition: By default, chan-type is same as 'chan,dir' property except
+	in some special channels, chan type supplement chan direction.
+	3 = default no direction, or inbound coalesced channel
 
 ==========================
 mhi event node properties:

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,7 +29,7 @@
 #define FEATURE_SUPPORTED(x)	((feature_mask << (i * 8)) & (1 << x))
 
 /* tracks which peripheral is undergoing SSR */
-static uint16_t reg_dirty;
+static uint16_t reg_dirty[NUM_PERIPHERALS];
 static uint8_t diag_id = DIAG_ID_APPS;
 static void diag_notify_md_client(uint8_t peripheral, int data);
 
@@ -66,18 +66,14 @@ void diag_cntl_channel_close(struct diagfwd_info *p_info)
 
 	driver->feature[peripheral].sent_feature_mask = 0;
 	driver->feature[peripheral].rcvd_feature_mask = 0;
-	mutex_lock(&driver->reg_dirty_mutex);
-	reg_dirty |= PERIPHERAL_MASK(peripheral);
-	mutex_unlock(&driver->reg_dirty_mutex);
+	reg_dirty[peripheral] = 1;
 	diag_cmd_remove_reg_by_proc(peripheral);
 	driver->diag_id_sent[peripheral] = 0;
 	driver->feature[peripheral].stm_support = DISABLE_STM;
 	driver->feature[peripheral].log_on_demand = 0;
 	driver->stm_state[peripheral] = DISABLE_STM;
 	driver->stm_state_requested[peripheral] = DISABLE_STM;
-	mutex_lock(&driver->reg_dirty_mutex);
-	reg_dirty ^= PERIPHERAL_MASK(peripheral);
-	mutex_unlock(&driver->reg_dirty_mutex);
+	reg_dirty[peripheral] = 0;
 	diag_notify_md_client(peripheral, DIAG_STATUS_CLOSED);
 }
 
@@ -111,7 +107,7 @@ static void diag_stm_update_work_fn(struct work_struct *work)
 
 void diag_notify_md_client(uint8_t peripheral, int data)
 {
-	int stat = 0;
+	int stat = 0, proc = DIAG_LOCAL_PROC;
 	struct siginfo info;
 	struct pid *pid_struct;
 	struct task_struct *result;
@@ -119,7 +115,7 @@ void diag_notify_md_client(uint8_t peripheral, int data)
 	if (peripheral > NUM_PERIPHERALS)
 		return;
 
-	if (driver->logging_mode != DIAG_MEMORY_DEVICE_MODE)
+	if (driver->logging_mode[DIAG_LOCAL_PROC] != DIAG_MEMORY_DEVICE_MODE)
 		return;
 
 	mutex_lock(&driver->md_session_lock);
@@ -128,20 +124,20 @@ void diag_notify_md_client(uint8_t peripheral, int data)
 	info.si_int = (PERIPHERAL_MASK(peripheral) | data);
 	info.si_signo = SIGCONT;
 
-	if (!driver->md_session_map[peripheral] ||
-		driver->md_session_map[peripheral]->pid <= 0) {
+	if (!driver->md_session_map[proc][peripheral] ||
+		driver->md_session_map[proc][peripheral]->pid <= 0) {
 		pr_err("diag: md_session_map[%d] is invalid\n", peripheral);
 		mutex_unlock(&driver->md_session_lock);
 		return;
 	}
 
 	pid_struct = find_get_pid(
-			driver->md_session_map[peripheral]->pid);
+		driver->md_session_map[proc][peripheral]->pid);
 	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,
 		"md_session_map[%d] pid = %d task = %pK\n",
 		peripheral,
-		driver->md_session_map[peripheral]->pid,
-		driver->md_session_map[peripheral]->task);
+		driver->md_session_map[proc][peripheral]->pid,
+		driver->md_session_map[proc][peripheral]->task);
 
 	if (pid_struct) {
 		result = get_pid_task(pid_struct, PIDTYPE_PID);
@@ -150,13 +146,14 @@ void diag_notify_md_client(uint8_t peripheral, int data)
 			DIAG_LOG(DIAG_DEBUG_PERIPHERALS,
 				"diag: md_session_map[%d] with pid = %d Exited..\n",
 				peripheral,
-				driver->md_session_map[peripheral]->pid);
+				driver->md_session_map[proc][peripheral]->pid);
 			mutex_unlock(&driver->md_session_lock);
 			return;
 		}
 
-		if (driver->md_session_map[peripheral] &&
-			driver->md_session_map[peripheral]->task == result) {
+		if (driver->md_session_map[proc][peripheral] &&
+			driver->md_session_map[proc][peripheral]->task ==
+								result) {
 			stat = send_sig_info(info.si_signo,
 					&info, result);
 			if (stat)
@@ -881,14 +878,11 @@ void diag_cntl_process_read_data(struct diagfwd_info *p_info, void *buf,
 	if (!buf || len <= 0 || !p_info)
 		return;
 
-	mutex_lock(&driver->reg_dirty_mutex);
-	if (reg_dirty & PERIPHERAL_MASK(p_info->peripheral)) {
+	if (reg_dirty[p_info->peripheral]) {
 		pr_err_ratelimited("diag: dropping command registration from peripheral %d\n",
 		       p_info->peripheral);
-		mutex_unlock(&driver->reg_dirty_mutex);
 		return;
 	}
-	mutex_unlock(&driver->reg_dirty_mutex);
 
 	while (read_len + header_len < len) {
 		ctrl_pkt = (struct diag_ctrl_pkt_header_t *)ptr;
@@ -955,7 +949,7 @@ static int diag_compute_real_time(int idx)
 		 * connection.
 		 */
 		real_time = MODE_REALTIME;
-	} else if (driver->usb_connected) {
+	} else if (driver->usb_connected || driver->pcie_connected) {
 		/*
 		 * If USB is connected, check individual process. If Memory
 		 * Device Mode is active, set the mode requested by Memory
@@ -1145,6 +1139,9 @@ void diag_real_time_work_fn(struct work_struct *work)
 
 		if (peripheral > NUM_PERIPHERALS)
 			peripheral = diag_search_peripheral_by_pd(i);
+
+		if (peripheral < 0 || peripheral >= NUM_PERIPHERALS)
+			continue;
 
 		if (!driver->feature[peripheral].peripheral_buffering)
 			continue;
@@ -1659,13 +1656,14 @@ int diagfwd_cntl_init(void)
 {
 	uint8_t peripheral = 0;
 
-	reg_dirty = 0;
 	driver->polling_reg_flag = 0;
 	driver->log_on_demand_support = 1;
 	driver->stm_peripheral = 0;
 	driver->close_transport = 0;
-	for (peripheral = 0; peripheral < NUM_PERIPHERALS; peripheral++)
+	for (peripheral = 0; peripheral < NUM_PERIPHERALS; peripheral++) {
 		driver->buffering_flag[peripheral] = 0;
+		reg_dirty[peripheral] = 0;
+	}
 
 	mutex_init(&driver->cntl_lock);
 	INIT_WORK(&(driver->stm_update_work), diag_stm_update_work_fn);
@@ -1677,7 +1675,6 @@ int diagfwd_cntl_init(void)
 	if (!driver->cntl_wq)
 		return -ENOMEM;
 
-	mutex_init(&driver->reg_dirty_mutex);
 	return 0;
 }
 

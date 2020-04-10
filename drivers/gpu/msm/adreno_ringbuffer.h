@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -108,6 +108,8 @@ struct adreno_ringbuffer_pagetable_info {
  * @gpr11: The gpr11 value of this RB
  * @preempted_midway: Indicates that the RB was preempted before rptr = wptr
  * @preempt_lock: Lock to protect the wptr pointer while it is being updated
+ * @skip_inline_wptr: Used during preemption to make sure wptr is updated in
+ * hardware
  */
 struct adreno_ringbuffer {
 	uint32_t flags;
@@ -130,6 +132,19 @@ struct adreno_ringbuffer {
 	unsigned int gpr11;
 	int preempted_midway;
 	spinlock_t preempt_lock;
+	bool skip_inline_wptr;
+	/**
+	 * @profile_desc: global memory to construct IB1s to do user side
+	 * profiling
+	 */
+	struct kgsl_memdesc profile_desc;
+	/**
+	 * @profile_index: Pointer to the next "slot" in profile_desc for a user
+	 * profiling IB1.  This allows for PAGE_SIZE / 16 = 256 simultaneous
+	 * commands per ringbuffer with user profiling enabled
+	 * enough.
+	 */
+	u32 profile_index;
 };
 
 /* Returns the current ringbuffer */
