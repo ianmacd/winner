@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -151,8 +151,8 @@ struct spcom_channel {
 	struct mutex lock;
 	uint32_t txn_id;           /* incrementing nonce per client request */
 	bool is_server;            /* for txn_id and response_timeout_msec  */
-	bool comm_role_undefined; /*  is true on channel creation, before */ 
-	/*  first tx/rx on channel */
+	bool comm_role_undefined;  /* is true on channel creation, before   */
+				   /* first tx/rx on channel                */
 	uint32_t response_timeout_msec; /* for client only */
 
 	/* char dev */
@@ -384,9 +384,9 @@ static int spcom_rx(struct spcom_channel *ch,
 
 		mutex_lock(&ch->lock);
 		if (timeout_msec && timeleft == 0) {
-			ch->txn_id++; /*  to drop expired rx packet later */
+			ch->txn_id++; /* to drop expired rx packet later */
 			pr_err("rx_done timeout expired %d ms, set txn_id=%d\n",
-				timeout_msec, ch->txn_id);
+			       timeout_msec, ch->txn_id);
 			ret = -ETIMEDOUT;
 			goto exit_err;
 		} else if (ch->rpmsg_abort) {
@@ -409,7 +409,7 @@ static int spcom_rx(struct spcom_channel *ch,
 		}
 	} else {
 		pr_debug("pending data size [%zu], requested size [%zu], ch->txn_id %d\n",
-			ch->actual_rx_size, size, ch->txn_id);
+			 ch->actual_rx_size, size, ch->txn_id);
 	}
 	if (!ch->rpmsg_rx_buf) {
 		pr_err("invalid rpmsg_rx_buf.\n");
@@ -1378,10 +1378,10 @@ static int spcom_device_release(struct inode *inode, struct file *filp)
 	ch->pid = 0;
 	if (ch->rpmsg_rx_buf) {
 		pr_debug("ch [%s] discarting unconsumed rx packet actual_rx_size=%d\n",
-			name, ch->actual_rx_size);
+		       name, ch->actual_rx_size);
 		kfree(ch->rpmsg_rx_buf);
 		ch->rpmsg_rx_buf = NULL;
-	} 
+	}
 	ch->actual_rx_size = 0;
 	mutex_unlock(&ch->lock);
 	filp->private_data = NULL;
@@ -1630,7 +1630,8 @@ static unsigned int spcom_device_poll(struct file *filp,
 			pr_debug("ch [%s] poll CH_CONNECT signaled.\n", name);
 		}
 		mutex_lock(&ch->lock);
-		done = completion_done(&ch->connect);
+		done = (ch->rpdev != NULL);
+		pr_debug("ch [%s] reported done=%d\n", name, done);
 		mutex_unlock(&ch->lock);
 		break;
 	default:
@@ -1683,7 +1684,7 @@ static int spcom_create_channel_chardev(const char *name)
 	ch = spcom_find_channel_by_name(name);
 	if (ch) {
 		pr_err("channel [%s] already exist.\n", name);
-		return -EINVAL;
+		return -EBUSY;
 	}
 
 	ch = spcom_find_channel_by_name(""); /* find reserved channel */
@@ -1887,12 +1888,12 @@ static void spcom_signal_rx_done(struct work_struct *ignored)
 			ch->is_server = true;
 			ch->txn_id = hdr->txn_id;
 			pr_debug("ch [%s] first packet txn_id=%d, it is server\n",
-				ch->name, ch->txn_id);
+				 ch->name, ch->txn_id);
 		}
 
 		if (ch->rpmsg_abort) {
 			if (ch->rpmsg_rx_buf) {
-				pr_debug("ch [%s] rx aborted free %d bytes\n",
+				pr_debug("ch [%s] rx aborted free %lu bytes\n",
 					ch->name, ch->actual_rx_size);
 				kfree(ch->rpmsg_rx_buf);
 				ch->actual_rx_size = 0;
@@ -1901,11 +1902,11 @@ static void spcom_signal_rx_done(struct work_struct *ignored)
 		}
 		if (ch->rpmsg_rx_buf) {
 			pr_err("ch [%s] previous buffer not consumed %lu bytes\n",
-				ch->name, ch->actual_rx_size);
+			       ch->name, ch->actual_rx_size);
 			kfree(ch->rpmsg_rx_buf);
 			ch->rpmsg_rx_buf = NULL;
 			ch->actual_rx_size = 0;
-		} 
+		}
 		if (!ch->is_server && (hdr->txn_id != ch->txn_id)) {
 			pr_err("ch [%s] rx dropped txn_id %d, ch->txn_id %d\n",
 				ch->name, hdr->txn_id, ch->txn_id);

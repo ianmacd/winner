@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -129,7 +129,7 @@ static void dp_bridge_pre_enable(struct drm_bridge *drm_bridge)
 	}
 
 	/* for SST force stream id, start slot and total slots to 0 */
-	dp->set_stream_info(dp, bridge->dp_panel, 0, 0, 0, 0);
+	dp->set_stream_info(dp, bridge->dp_panel, 0, 0, 0, 0, 0);
 
 	rc = dp->enable(dp, bridge->dp_panel);
 	if (rc) {
@@ -379,15 +379,18 @@ int dp_connector_get_mode_info(struct drm_connector *connector,
 		struct msm_mode_info *mode_info,
 		u32 max_mixer_width, void *display)
 {
-	const u32 dual_lm = 2;
-	const u32 single_lm = 1;
 	const u32 single_intf = 1;
 	const u32 no_enc = 0;
 	struct msm_display_topology *topology;
 	struct sde_connector *sde_conn;
 	struct dp_panel *dp_panel;
+	struct dp_display_mode dp_mode;
+	struct dp_display *dp_disp = display;
+	struct msm_drm_private *priv;
+	int rc = 0;
 
-	if (!drm_mode || !mode_info || !max_mixer_width || !connector) {
+	if (!drm_mode || !mode_info || !max_mixer_width || !connector ||
+			!display) {
 		pr_err("invalid params\n");
 		return -EINVAL;
 	}
@@ -396,10 +399,17 @@ int dp_connector_get_mode_info(struct drm_connector *connector,
 
 	sde_conn = to_sde_connector(connector);
 	dp_panel = sde_conn->drv_panel;
+	priv = connector->dev->dev_private;
 
 	topology = &mode_info->topology;
-	topology->num_lm = (max_mixer_width <= drm_mode->hdisplay) ?
-							dual_lm : single_lm;
+
+	rc = msm_get_mixer_count(priv, drm_mode, max_mixer_width,
+			&topology->num_lm);
+	if (rc) {
+		pr_err("error getting mixer count, rc:%d\n", rc);
+		return rc;
+	}
+
 	topology->num_enc = no_enc;
 	topology->num_intf = single_intf;
 
@@ -407,6 +417,16 @@ int dp_connector_get_mode_info(struct drm_connector *connector,
 	mode_info->vtotal = drm_mode->vtotal;
 
 	mode_info->wide_bus_en = dp_panel->widebus_en;
+
+	dp_disp->convert_to_dp_mode(dp_disp, dp_panel, drm_mode, &dp_mode);
+
+	if (dp_mode.timing.comp_info.comp_ratio) {
+		memcpy(&mode_info->comp_info,
+			&dp_mode.timing.comp_info,
+			sizeof(mode_info->comp_info));
+
+		topology->num_enc = topology->num_lm;
+	}
 
 	return 0;
 }
@@ -607,4 +627,25 @@ enum drm_mode_status dp_connector_mode_valid(struct drm_connector *connector,
 	mode->vrefresh = drm_mode_vrefresh(mode);
 
 	return dp_disp->validate_mode(dp_disp, sde_conn->drv_panel, mode);
+}
+
+int dp_connector_update_pps(struct drm_connector *connector,
+		char *pps_cmd, void *display)
+{
+	struct dp_display *dp_disp;
+	struct sde_connector *sde_conn;
+
+	if (!display || !connector) {
+		pr_err("invalid params\n");
+		return -EINVAL;
+	}
+
+	sde_conn = to_sde_connector(connector);
+	if (!sde_conn->drv_panel) {
+		pr_err("invalid dp panel\n");
+		return MODE_ERROR;
+	}
+
+	dp_disp = display;
+	return dp_disp->update_pps(dp_disp, connector, pps_cmd);
 }

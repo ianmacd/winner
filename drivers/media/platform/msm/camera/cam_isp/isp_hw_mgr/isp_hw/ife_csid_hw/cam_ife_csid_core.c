@@ -584,7 +584,7 @@ end:
 static int cam_ife_csid_cid_reserve(struct cam_ife_csid_hw *csid_hw,
 	struct cam_csid_hw_reserve_resource_args  *cid_reserv)
 {
-	int rc = 0;
+	int rc = 0, i = 0;
 	struct cam_ife_csid_cid_data       *cid_data;
 	uint32_t camera_hw_version;
 
@@ -694,8 +694,20 @@ static int cam_ife_csid_cid_reserve(struct cam_ife_csid_hw *csid_hw,
 		/* current configure res type should match requested res type */
 		if (csid_hw->res_type != cid_reserv->in_port->res_type) {
 			rc = -EINVAL;
-			CAM_INFO(CAM_ISP, " Curres_type %x, Requested = %x", csid_hw->res_type ,
-			    cid_reserv->in_port->res_type);
+			CAM_INFO(CAM_ISP, " Curres_type %x, Requested = %x",
+				csid_hw->res_type ,
+				cid_reserv->in_port->res_type);
+			for (i = 0; i < CAM_IFE_CSID_CID_RES_MAX; i++) {
+				cid_data = (struct cam_ife_csid_cid_data *)
+					csid_hw->cid_res[i].res_priv;
+
+				if (cid_data)
+					CAM_INFO(CAM_ISP, "res_state %u vc %u dt %u cnt% u tpg_set %u",
+						csid_hw->cid_res[i].res_state, cid_data->vc, cid_data->dt, cid_data->cnt,
+						cid_data->tpg_set);
+				else
+					CAM_INFO(CAM_ISP, "cid_data is NULL");
+			}
 			goto end;
 		}
 
@@ -732,6 +744,17 @@ static int cam_ife_csid_cid_reserve(struct cam_ife_csid_hw *csid_hw,
 			CAM_ERR(CAM_ISP,
 				"CSID:%d IPP resource not available",
 				csid_hw->hw_intf->hw_idx);
+			for (i = 0; i < CAM_IFE_CSID_CID_RES_MAX; i++) {
+				cid_data = (struct cam_ife_csid_cid_data *)
+					csid_hw->cid_res[i].res_priv;
+
+				if (cid_data)
+					CAM_INFO(CAM_ISP, "res_state %u, vc %u dt %u cnt% u tpg_set %u",
+					csid_hw->cid_res[i].res_state, cid_data->vc, cid_data->dt, cid_data->cnt,
+					cid_data->tpg_set);
+				else
+					CAM_INFO(CAM_ISP, "cid_data is NULL");
+			}
 			rc = -EINVAL;
 			goto end;
 		}
@@ -2514,7 +2537,13 @@ static int cam_ife_csid_release(void *hw_priv,
 			csid_hw->hw_intf->hw_idx,
 			res->res_type, res->res_id,
 			res->res_state);
-		goto end;
+
+		if (res->res_type != CAM_ISP_RESOURCE_CID) {
+			goto end;
+		} else {
+			cid_data = (struct cam_ife_csid_cid_data    *) res->res_priv;
+			CAM_WARN(CAM_ISP, "cid data cnt %d", cid_data->cnt);
+		}
 	}
 
 	CAM_INFO(CAM_ISP, "CSID:%d res type :%d Resource id:%d",

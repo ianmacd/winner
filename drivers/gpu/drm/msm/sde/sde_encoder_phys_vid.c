@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -89,7 +89,8 @@ static void drm_mode_to_intf_timing_params(
 	 */
 	timing->width = mode->hdisplay;	/* active width */
 
-	if (vid_enc->base.comp_type == MSM_DISPLAY_COMPRESSION_DSC) {
+	if (phys_enc->hw_intf->cap->type != INTF_DP &&
+		vid_enc->base.comp_type == MSM_DISPLAY_COMPRESSION_DSC) {
 		comp_ratio = vid_enc->base.comp_ratio;
 		if (comp_ratio == MSM_DISPLAY_COMPRESSION_RATIO_2_TO_1)
 			timing->width = DIV_ROUND_UP(timing->width, 2);
@@ -112,6 +113,7 @@ static void drm_mode_to_intf_timing_params(
 	timing->underflow_clr = 0xff;
 	timing->hsync_skew = mode->hskew;
 	timing->v_front_porch_fixed = vid_enc->base.vfp_cached;
+	timing->compression_en = false;
 
 	/* DSI controller cannot handle active-low sync signals. */
 	if (phys_enc->hw_intf->cap->type == INTF_DSI) {
@@ -129,6 +131,30 @@ static void drm_mode_to_intf_timing_params(
 	}
 
 	timing->wide_bus_en = vid_enc->base.wide_bus_en;
+
+	/*
+	 * for DP, divide the horizonal parameters by 2 when
+	 * widebus or compression is enabled, irrespective of
+	 * compression ratio
+	 */
+	if (phys_enc->hw_intf->cap->type == INTF_DP &&
+		(timing->wide_bus_en || vid_enc->base.comp_ratio)) {
+		timing->width = timing->width >> 1;
+		timing->xres = timing->xres >> 1;
+		timing->h_back_porch = timing->h_back_porch >> 1;
+		timing->h_front_porch = timing->h_front_porch >> 1;
+		timing->hsync_pulse_width = timing->hsync_pulse_width >> 1;
+
+		if (vid_enc->base.comp_type == MSM_DISPLAY_COMPRESSION_DSC &&
+				vid_enc->base.comp_ratio) {
+			timing->compression_en = true;
+			timing->extra_dto_cycles =
+				vid_enc->base.dsc_extra_pclk_cycle_cnt;
+			timing->width += vid_enc->base.dsc_extra_disp_width;
+			timing->h_back_porch +=
+				vid_enc->base.dsc_extra_disp_width;
+		}
+	}
 
 	/*
 	 * For edp only:
@@ -391,7 +417,7 @@ static void _sde_encoder_phys_vid_setup_avr(
 			return;
 		}
 
-		if (qsync_min_fps >= default_fps) {
+		if (qsync_min_fps > default_fps) {
 			SDE_ERROR_VIDENC(vid_enc,
 				"qsync fps %d must be less than default %d\n",
 				qsync_min_fps, default_fps);
@@ -444,8 +470,10 @@ static void sde_encoder_phys_vid_setup_timing_engine(
 	u32 qsync_min_fps = 0;
 	unsigned long lock_flags;
 	struct sde_hw_intf_cfg intf_cfg = { 0 };
+	bool is_split_link = false;
 
-	if (!phys_enc || !phys_enc->sde_kms || !phys_enc->hw_ctl) {
+	if (!phys_enc || !phys_enc->sde_kms || !phys_enc->hw_ctl ||
+					!phys_enc->hw_intf) {
 		SDE_ERROR("invalid encoder %d\n", phys_enc != 0);
 		return;
 	}
@@ -460,7 +488,8 @@ static void sde_encoder_phys_vid_setup_timing_engine(
 	SDE_DEBUG_VIDENC(vid_enc, "enabling mode:\n");
 	drm_mode_debug_printmodeline(&mode);
 
-	if (phys_enc->split_role != ENC_ROLE_SOLO) {
+	is_split_link = phys_enc->hw_intf->cfg.split_link_en;
+	if (phys_enc->split_role != ENC_ROLE_SOLO || is_split_link) {
 		mode.hdisplay >>= 1;
 		mode.htotal >>= 1;
 		mode.hsync_start >>= 1;
@@ -871,6 +900,11 @@ static void sde_encoder_phys_vid_enable(struct sde_encoder_phys *phys_enc)
 		ctl->ops.update_bitmask_merge3d(ctl,
 			phys_enc->hw_pp->merge_3d->idx, 1);
 
+	if (phys_enc->hw_intf->cap->type == INTF_DP &&
+		phys_enc->comp_type == MSM_DISPLAY_COMPRESSION_DSC &&
+		phys_enc->comp_ratio && ctl->ops.update_bitmask_periph)
+		ctl->ops.update_bitmask_periph(ctl, intf->idx, 1);
+
 skip_flush:
 	SDE_DEBUG_VIDENC(vid_enc, "update pending flush ctl %d intf %d\n",
 		ctl->idx - CTL_0, intf->idx);
@@ -1056,9 +1090,6 @@ static int sde_encoder_phys_vid_prepare_for_kickoff(
 		vid_enc->error_count = 0;
 	}
 
-	if (sde_connector_is_qsync_updated(phys_enc->connector))
-		_sde_encoder_phys_vid_avr_ctrl(phys_enc);
-
 	programmable_rot_fetch_config(phys_enc,
 			params->inline_rotate_prefill, params->is_primary);
 
@@ -1204,6 +1235,20 @@ static void sde_encoder_phys_vid_handle_post_kickoff(
 				phys_enc->hw_intf->idx - INTF_0,
 				SDE_EVTLOG_FUNC_CASE9);
 	}
+}
+
+static void sde_encoder_phys_vid_prepare_for_commit(
+		struct sde_encoder_phys *phys_enc)
+{
+
+	if (!phys_enc) {
+		SDE_ERROR("invalid encoder parameters\n");
+		return;
+	}
+
+	if (sde_connector_is_qsync_updated(phys_enc->connector))
+		_sde_encoder_phys_vid_avr_ctrl(phys_enc);
+
 }
 
 static void sde_encoder_phys_vid_irq_control(struct sde_encoder_phys *phys_enc,
@@ -1360,6 +1405,7 @@ static void sde_encoder_phys_vid_init_ops(struct sde_encoder_phys_ops *ops)
 	ops->get_wr_line_count = sde_encoder_phys_vid_get_line_count;
 	ops->wait_dma_trigger = sde_encoder_phys_vid_wait_dma_trigger;
 	ops->wait_for_active = sde_encoder_phys_vid_wait_for_active;
+	ops->prepare_commit = sde_encoder_phys_vid_prepare_for_commit;
 }
 
 struct sde_encoder_phys *sde_encoder_phys_vid_init(

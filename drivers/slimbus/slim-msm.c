@@ -182,8 +182,12 @@ static int msm_slim_iommu_attach(struct msm_slim_ctrl *ctrl_dev)
 	if (!ctrl_dev->iommu_desc.cb_dev)
 		return 0;
 
-	if (!IS_ERR_OR_NULL(ctrl_dev->iommu_desc.iommu_map))
-		return 0;
+	if (!IS_ERR_OR_NULL(ctrl_dev->iommu_desc.iommu_map)) {
+		arm_iommu_detach_device(ctrl_dev->iommu_desc.cb_dev);
+		arm_iommu_release_mapping(ctrl_dev->iommu_desc.iommu_map);
+		ctrl_dev->iommu_desc.iommu_map = NULL;
+		SLIM_INFO(ctrl_dev, "NGD IOMMU Dettach complete\n");
+	}
 
 	dev = ctrl_dev->iommu_desc.cb_dev;
 	iommu_map = arm_iommu_create_mapping(&platform_bus_type,
@@ -653,12 +657,6 @@ void msm_slim_tx_msg_return(struct msm_slim_ctrl *dev, int err)
 		}
 		idx = (int) ((addr - mem->phys_base)
 			/ SLIM_MSGQ_BUF_LEN);
-		if (dev->wr_comp[idx]) {
-			struct completion *comp = dev->wr_comp[idx];
-
-			dev->wr_comp[idx] = NULL;
-			complete(comp);
-		}
 		if (err) {
 			int i;
 			u32 *addr = (u32 *)mem->base +
@@ -672,6 +670,12 @@ void msm_slim_tx_msg_return(struct msm_slim_ctrl *dev, int err)
 			SLIM_WARN(dev, "SLIM OUT OF ORDER TX:idx:%d, head:%d",
 				idx, dev->tx_head);
 		dev->tx_head = (dev->tx_head + 1) % MSM_TX_BUFS;
+		if (dev->wr_comp[idx]) {
+			struct completion *comp = dev->wr_comp[idx];
+
+			dev->wr_comp[idx] = NULL;
+			complete(comp);
+		}
 	}
 }
 
@@ -1297,12 +1301,6 @@ void msm_slim_sps_exit(struct msm_slim_ctrl *dev, bool dereg)
 	for (i = 0; i < dev->port_nums; i++) {
 		if (dev->pipes[i].connected)
 			msm_slim_disconn_pipe_port(dev, i);
-	}
-
-	if (!IS_ERR_OR_NULL(dev->iommu_desc.iommu_map)) {
-		arm_iommu_detach_device(dev->iommu_desc.cb_dev);
-		arm_iommu_release_mapping(dev->iommu_desc.iommu_map);
-		dev->iommu_desc.iommu_map = NULL;
 	}
 
 	if (dereg) {

@@ -1220,7 +1220,7 @@ static void sx9330_init_work_func(struct work_struct *work)
 		/* Defence code */
 		if (data->capMain == 0 && data->avg == 0 && data->diff == 0
 			&& data->useful == 0 && data->offset == 0) {
-			pr_info("[SX9330]: Defece code for grip sensor - retry: %d\n", retry);
+			pr_info("[SX9330]: Defence code for grip sensor - retry: %d\n", retry);
 
 			voltage = regulator_get_voltage(data->reg_vdd);
 			pr_info("[SX9330] %s - voltage : %d", __func__, voltage);

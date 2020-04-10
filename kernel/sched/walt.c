@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -31,9 +31,8 @@
 
 #include <trace/events/sched.h>
 
-#ifdef CONFIG_SEC_DEBUG_SUMMARY
+#ifdef CONFIG_SEC_DEBUG
 #include <linux/sec_debug.h>
-#include <linux/sec_debug_summary.h>
 #endif
 
 const char *task_event_names[] = {"PUT_PREV_TASK", "PICK_NEXT_TASK",
@@ -308,7 +307,7 @@ void fixup_walt_sched_stats_common(struct rq *rq, struct task_struct *p,
  *	C1 busy time = 5 + 5 + 6 = 16ms
  *
  */
-__read_mostly int sched_freq_aggregate_threshold;
+__read_mostly bool sched_freq_aggr_en;
 
 static u64
 update_window_start(struct rq *rq, u64 wallclock, int event)
@@ -426,7 +425,6 @@ void clear_walt_request(int cpu)
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 
-	clear_boost_kick(cpu);
 	clear_reserved(cpu);
 	if (rq->push_task) {
 		struct task_struct *push_task = NULL;
@@ -511,7 +509,6 @@ static u32  top_task_load(struct rq *rq)
 u64 freq_policy_load(struct rq *rq)
 {
 	unsigned int reporting_policy = sysctl_sched_freq_reporting_policy;
-	int freq_aggr_thresh = sched_freq_aggregate_threshold;
 	struct sched_cluster *cluster = rq->cluster;
 	u64 aggr_grp_load = cluster->aggr_grp_load;
 	u64 load, tt_load = 0;
@@ -522,7 +519,7 @@ u64 freq_policy_load(struct rq *rq)
 		goto done;
 	}
 
-	if (aggr_grp_load > freq_aggr_thresh)
+	if (sched_freq_aggr_en)
 		load = rq->prev_runnable_sum + aggr_grp_load;
 	else
 		load = rq->prev_runnable_sum + rq->grp_time.prev_runnable_sum;
@@ -545,7 +542,7 @@ u64 freq_policy_load(struct rq *rq)
 	}
 
 done:
-	trace_sched_load_to_gov(rq, aggr_grp_load, tt_load, freq_aggr_thresh,
+	trace_sched_load_to_gov(rq, aggr_grp_load, tt_load, sched_freq_aggr_en,
 				load, reporting_policy, walt_rotation_enabled,
 				sysctl_sched_little_cluster_coloc_fmin_khz,
 				coloc_boost_load);
@@ -2029,11 +2026,10 @@ void init_new_task_load(struct task_struct *p)
 	memset(&p->ravg, 0, sizeof(struct ravg));
 	p->cpu_cycles = 0;
 
-	p->ravg.curr_window_cpu = kcalloc(nr_cpu_ids, sizeof(u32), GFP_KERNEL);
-	p->ravg.prev_window_cpu = kcalloc(nr_cpu_ids, sizeof(u32), GFP_KERNEL);
-
-	/* Don't have much choice. CPU frequency would be bogus */
-	BUG_ON(!p->ravg.curr_window_cpu || !p->ravg.prev_window_cpu);
+	p->ravg.curr_window_cpu = kcalloc(nr_cpu_ids, sizeof(u32),
+					  GFP_KERNEL | __GFP_NOFAIL);
+	p->ravg.prev_window_cpu = kcalloc(nr_cpu_ids, sizeof(u32),
+					  GFP_KERNEL | __GFP_NOFAIL);
 
 	if (init_load_pct) {
 		init_load_windows = div64_u64((u64)init_load_pct *
@@ -2211,7 +2207,7 @@ static int compute_max_possible_capacity(struct sched_cluster *cluster)
 	return capacity;
 }
 
-static void update_min_max_capacity(void)
+void walt_update_min_max_capacity(void)
 {
 	unsigned long flags;
 
@@ -2382,7 +2378,7 @@ static int cpufreq_notifier_policy(struct notifier_block *nb,
 	if (val != CPUFREQ_NOTIFY)
 		return 0;
 
-	update_min_max_capacity();
+	walt_update_min_max_capacity();
 
 	max_possible_freq = max(max_possible_freq, policy->cpuinfo.max_freq);
 	if (min_max_freq == 1)
@@ -2521,14 +2517,9 @@ static void transfer_busy_time(struct rq *rq, struct related_thread_group *grp,
  */
 unsigned int __read_mostly sysctl_sched_enable_thread_grouping;
 
-/* Maximum allowed threshold before freq aggregation must be enabled */
-#define MAX_FREQ_AGGR_THRESH 1000
-
 struct related_thread_group *related_thread_groups[MAX_NUM_CGROUP_COLOC_ID];
 static LIST_HEAD(active_related_thread_groups);
 DEFINE_RWLOCK(related_thread_group_lock);
-
-unsigned int __read_mostly sysctl_sched_freq_aggregate_threshold_pct;
 
 /*
  * Task groups whose aggregate demand on a cpu is more than
@@ -2680,23 +2671,6 @@ DEFINE_MUTEX(policy_mutex);
 
 #define pct_to_real(tunable)	\
 		(div64_u64((u64)tunable * (u64)max_task_load(), 100))
-
-unsigned int update_freq_aggregate_threshold(unsigned int threshold)
-{
-	unsigned int old_threshold;
-
-	mutex_lock(&policy_mutex);
-
-	old_threshold = sysctl_sched_freq_aggregate_threshold_pct;
-
-	sysctl_sched_freq_aggregate_threshold_pct = threshold;
-	sched_freq_aggregate_threshold =
-		pct_to_real(sysctl_sched_freq_aggregate_threshold_pct);
-
-	mutex_unlock(&policy_mutex);
-
-	return old_threshold;
-}
 
 #define ADD_TASK	0
 #define REM_TASK	1
@@ -2928,7 +2902,6 @@ static int __init create_default_coloc_group(void)
 	list_add(&grp->list, &active_related_thread_groups);
 	write_unlock_irqrestore(&related_thread_group_lock, flags);
 
-	update_freq_aggregate_threshold(MAX_FREQ_AGGR_THRESH);
 	return 0;
 }
 late_initcall(create_default_coloc_group);
@@ -3170,7 +3143,7 @@ static void walt_update_coloc_boost_load(void)
 	struct sched_cluster *cluster;
 
 	if (!sysctl_sched_little_cluster_coloc_fmin_khz ||
-			sysctl_sched_boost == CONSERVATIVE_BOOST)
+			sched_boost() == CONSERVATIVE_BOOST)
 		return;
 
 	grp = lookup_related_thread_group(DEFAULT_CGROUP_COLOC_ID);
@@ -3218,13 +3191,19 @@ void walt_irq_work(struct irq_work *irq_work)
 	u64 wc;
 	bool is_migration = false;
 	u64 total_grp_load = 0;
+	int level = 0;
 
 	/* Am I the window rollover work or the migration work? */
 	if (irq_work == &walt_migration_irq_work)
 		is_migration = true;
 
-	for_each_cpu(cpu, cpu_possible_mask)
-		raw_spin_lock(&cpu_rq(cpu)->lock);
+	for_each_cpu(cpu, cpu_possible_mask) {
+		if (level == 0)
+			raw_spin_lock(&cpu_rq(cpu)->lock);
+		else
+			raw_spin_lock_nested(&cpu_rq(cpu)->lock, level);
+		level++;
+	}
 
 	wc = sched_ktime_clock();
 	walt_load_reported_window = atomic64_read(&walt_irq_work_lastq_ws);

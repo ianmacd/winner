@@ -671,7 +671,6 @@ void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 						SND_JACK_LINEOUT |
 						SND_JACK_ANC_HEADPHONE |
 						SND_JACK_UNSUPPORTED);
-			mbhc->force_linein = false;
 		}
 
 		if (mbhc->current_plug == MBHC_PLUG_TYPE_HEADSET &&
@@ -738,6 +737,25 @@ void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 			}
 		}
 
+		/* Do not calculate impedance again for lineout
+		 * as during playback pa is on and impedance values
+		 * will not be correct resulting in lineout detected
+		 * as headphone.
+		 */
+		if ((is_pa_on) && mbhc->force_linein == true) {
+			jack_type = SND_JACK_LINEOUT;
+			mbhc->current_plug = MBHC_PLUG_TYPE_HIGH_HPH;
+			if (mbhc->hph_status) {
+				mbhc->hph_status &= ~(SND_JACK_HEADSET |
+						SND_JACK_LINEOUT |
+						SND_JACK_UNSUPPORTED);
+				wcd_mbhc_jack_report(mbhc,
+						&mbhc->headset_jack,
+						mbhc->hph_status,
+						WCD_MBHC_JACK_MASK);
+			}
+		}
+
 		mbhc->hph_status |= jack_type;
 
 		pr_debug("%s: Reporting insertion %d(%x)\n", __func__,
@@ -797,7 +815,7 @@ void wcd_mbhc_find_plug_and_report(struct wcd_mbhc *mbhc,
 	enum snd_jack_types jack_type;
 
 	if (mbhc->deinit_in_progress) {
-		pr_info("%s: mbhc deinit in progess: ignore report\n");
+		pr_info("%s: mbhc deinit in progess: ignore report\n", __func__);
 		return;
 	}
 
@@ -1008,6 +1026,8 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
 			jack_type = SND_JACK_HEADSET;
 			break;
 		case MBHC_PLUG_TYPE_HIGH_HPH:
+			if (mbhc->mbhc_detection_logic == WCD_DETECTION_ADC)
+			    WCD_MBHC_REG_UPDATE_BITS(WCD_MBHC_ELECT_ISRC_EN, 0);
 			mbhc->is_extn_cable = false;
 			jack_type = SND_JACK_LINEOUT;
 			break;
@@ -1381,9 +1401,6 @@ static int wcd_mbhc_initialise(struct wcd_mbhc *mbhc)
 	 * by an external source
 	 */
 	if (mbhc->mbhc_cfg->enable_usbc_analog) {
-		mbhc->hphl_swh = 0;
-		mbhc->gnd_swh = 0;
-
 		if (mbhc->mbhc_cb->hph_pull_up_control_v2)
 			mbhc->mbhc_cb->hph_pull_up_control_v2(codec,
 							      HS_PULLUP_I_OFF);

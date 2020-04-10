@@ -36,6 +36,7 @@
 #include <linux/bio.h>
 #include "ext4.h"
 #include "ext4_jbd2.h"
+#include <linux/sec_debug.h>
 
 #include "xattr.h"
 #include "acl.h"
@@ -125,6 +126,7 @@ static struct buffer_head *__ext4_read_dirblock(struct inode *inode,
 	if (!is_dx_block && type == INDEX) {
 		ext4_error_inode(inode, func, line, block,
 		       "directory leaf block found instead of index block");
+		brelse(bh);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 	if (!ext4_has_metadata_csum(inode->i_sb) ||
@@ -869,19 +871,20 @@ static void dx_release(struct dx_frame *frames)
 {
 	struct dx_root_info *info;
 	int i;
+	unsigned int indirect_levels;
 
 	if (frames[0].bh == NULL)
 		return;
 
 	info = &((struct dx_root *)frames[0].bh->b_data)->info;
-	for (i = 1; i <= info->indirect_levels; i++) {
+	/* save local copy, "info" may be freed after brelse() */
+	indirect_levels = info->indirect_levels;
+	for (i = 0; i <= indirect_levels; i++) {
 		if (frames[i].bh == NULL)
 			break;
 		brelse(frames[i].bh);
 		frames[i].bh = NULL;
 	}
-	brelse(frames[0].bh);
-	frames[0].bh = NULL;
 }
 
 /*
@@ -2464,6 +2467,24 @@ retry:
 		ext4_journal_stop(handle);
 	if (err == -ENOSPC && ext4_should_retry_alloc(dir->i_sb, &retries))
 		goto retry;
+
+	if (!err && sec_debug_level() == ANDROID_DEBUG_LEVEL_MID) {
+		char *buffer = NULL;
+		int ret;
+
+		buffer = (char *) kzalloc(1024, GFP_KERNEL);
+		if (buffer == NULL) {
+			pr_err("SELinux DEBUG: kmalloc failed");
+			goto out;
+		}
+
+		ret = ext4_xattr_get(inode, EXT4_XATTR_INDEX_SECURITY,
+				XATTR_SELINUX_SUFFIX, buffer, 1024);
+		BUG_ON(ret == -ENODATA || strstr(buffer, "unlabeled") ||
+				!strcmp(buffer, ""));
+		kfree(buffer);
+	}
+out:
 	return err;
 }
 
@@ -2817,7 +2838,9 @@ int ext4_orphan_add(handle_t *handle, struct inode *inode)
 			list_del_init(&EXT4_I(inode)->i_orphan);
 			mutex_unlock(&sbi->s_orphan_lock);
 		}
-	}
+	} else
+		brelse(iloc.bh);
+
 	jbd_debug(4, "superblock will point to %lu\n", inode->i_ino);
 	jbd_debug(4, "orphan inode %lu will point to %d\n",
 			inode->i_ino, NEXT_ORPHAN(inode));

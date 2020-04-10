@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -117,8 +117,23 @@ static int dsi_phy_regmap_init(struct platform_device *pdev,
 
 	phy->hw.base = ptr;
 
+	ptr = msm_ioremap(pdev, "dyn_refresh_base", phy->name);
+	phy->hw.dyn_pll_base = ptr;
+
 	pr_debug("[%s] map dsi_phy registers to %pK\n",
 		phy->name, phy->hw.base);
+
+	switch (phy->ver_info->version) {
+	case DSI_PHY_VERSION_2_0:
+		ptr = msm_ioremap(pdev, "phy_clamp_base", phy->name);
+		if (IS_ERR(ptr))
+			phy->hw.phy_clamp_base = NULL;
+		else
+			phy->hw.phy_clamp_base = ptr;
+		break;
+	default:
+		break;
+	}
 
 	return rc;
 }
@@ -266,6 +281,32 @@ static int dsi_phy_parse_dt_per_lane_cfgs(struct platform_device *pdev,
 	return rc;
 }
 
+static int dsi_phy_parse_dt_per_lane_bits(struct platform_device *pdev,
+					  u8 *bits,
+					  char *property)
+{
+	int rc = 0, i = 0;
+	const u8 *data;
+	u32 len = 0;
+
+	data = of_get_property(pdev->dev.of_node, property, &len);
+	if (!data)
+		return 0;
+
+	if (len != DSI_LANE_MAX) {
+		pr_err("incorrect phy %s settings, exp=%d, act=%d\n",
+		       property, DSI_LANE_MAX, len);
+		return -EINVAL;
+	}
+
+	*bits = 0;
+
+	for (i = DSI_LOGICAL_LANE_0; i < DSI_LANE_MAX; i++)
+		*bits |= (data[i] & 0x01) << i;
+
+	return rc;
+}
+
 static int dsi_phy_settings_init(struct platform_device *pdev,
 				 struct msm_dsi_phy *phy)
 {
@@ -301,6 +342,13 @@ static int dsi_phy_settings_init(struct platform_device *pdev,
 		}
 	}
 
+	rc = dsi_phy_parse_dt_per_lane_bits(pdev, &phy->cfg.lane_pnswap,
+					    "qcom,platform-lane-pnswap");
+	if (rc) {
+		pr_err("failed to parse lane P/N swap map, rc=%d\n", rc);
+		goto err;
+	}
+
 	/* Actual timing values are dependent on panel */
 	timing->count_per_lane = phy->ver_info->timing_cfg_count;
 
@@ -310,9 +358,6 @@ static int dsi_phy_settings_init(struct platform_device *pdev,
 	of_property_read_u32(pdev->dev.of_node,
 			"qcom,dsi-phy-regulator-min-datarate-bps",
 			&phy->regulator_min_datarate_bps);
-
-	phy->cfg.force_clk_lane_hs = of_property_read_bool(pdev->dev.of_node,
-			"qcom,panel-force-clock-lane-hs");
 
 	return 0;
 err:
@@ -377,6 +422,8 @@ static int dsi_phy_driver_probe(struct platform_device *pdev)
 
 	pr_debug("Probing %s device\n", dsi_phy->name);
 
+	dsi_phy->ver_info = ver_info;
+
 	rc = dsi_phy_regmap_init(pdev, dsi_phy);
 	if (rc) {
 		pr_err("Failed to parse register information, rc=%d\n", rc);
@@ -397,7 +444,6 @@ static int dsi_phy_driver_probe(struct platform_device *pdev)
 		goto fail_supplies;
 	}
 
-	dsi_phy->ver_info = ver_info;
 	rc = dsi_phy_settings_init(pdev, dsi_phy);
 	if (rc) {
 		pr_err("Failed to parse phy setting, rc=%d\n", rc);
@@ -629,11 +675,8 @@ int dsi_phy_validate_mode(struct msm_dsi_phy *dsi_phy,
 		return -EINVAL;
 	}
 
-	mutex_lock(&dsi_phy->phy_lock);
-
 	pr_debug("[PHY_%d] Skipping validation\n", dsi_phy->index);
 
-	mutex_unlock(&dsi_phy->phy_lock);
 	return rc;
 }
 
@@ -798,7 +841,7 @@ int dsi_phy_set_ulps(struct msm_dsi_phy *phy, struct dsi_host_config *config,
 
 	if (!phy) {
 		pr_err("Invalid params\n");
-		return -EINVAL;
+		return DSI_PHY_ULPS_ERROR;
 	}
 
 	if (!phy->hw.ops.ulps_ops.ulps_request ||
@@ -807,7 +850,7 @@ int dsi_phy_set_ulps(struct msm_dsi_phy *phy, struct dsi_host_config *config,
 			!phy->hw.ops.ulps_ops.is_lanes_in_ulps ||
 			!phy->hw.ops.ulps_ops.wait_for_lane_idle) {
 		pr_debug("DSI PHY ULPS ops not present\n");
-		return 0;
+		return DSI_PHY_ULPS_NOT_HANDLED;
 	}
 
 	mutex_lock(&phy->phy_lock);
@@ -820,6 +863,7 @@ int dsi_phy_set_ulps(struct msm_dsi_phy *phy, struct dsi_host_config *config,
 	if (rc) {
 		pr_err("[DSI_PHY%d] Ulps state change(%d) failed, rc=%d\n",
 			phy->index, enable, rc);
+		rc = DSI_PHY_ULPS_ERROR;
 		goto error;
 	}
 	pr_debug("[DSI_PHY%d] ULPS state = %d\n", phy->index, enable);
@@ -874,7 +918,7 @@ int dsi_phy_enable(struct msm_dsi_phy *phy,
 		rc = phy->hw.ops.calculate_timing_params(&phy->hw,
 						 &phy->mode,
 						 &config->common_config,
-						 &phy->cfg.timing);
+						 &phy->cfg.timing, false);
 	if (rc) {
 		pr_err("[%s] failed to set timing, rc=%d\n", phy->name, rc);
 		goto error;
@@ -888,6 +932,27 @@ int dsi_phy_enable(struct msm_dsi_phy *phy,
 
 error:
 	mutex_unlock(&phy->phy_lock);
+
+	return rc;
+}
+
+/* update dsi phy timings for dynamic clk switch use case */
+int dsi_phy_update_phy_timings(struct msm_dsi_phy *phy,
+			       struct dsi_host_config *config)
+{
+	int rc = 0;
+
+	if (!phy || !config) {
+		pr_err("invalid argument\n");
+		return -EINVAL;
+	}
+
+	memcpy(&phy->mode, &config->video_timing, sizeof(phy->mode));
+	rc = phy->hw.ops.calculate_timing_params(&phy->hw, &phy->mode,
+						 &config->common_config,
+						 &phy->cfg.timing, true);
+	if (rc)
+		pr_err("failed to calculate phy timings %d\n", rc);
 
 	return rc;
 }
@@ -1056,6 +1121,7 @@ int dsi_phy_set_timing_params(struct msm_dsi_phy *phy,
 		rc = phy->hw.ops.phy_timing_val(&phy->cfg.timing, timing, size);
 	if (!rc)
 		phy->cfg.is_phy_timing_present = true;
+
 	mutex_unlock(&phy->phy_lock);
 	return rc;
 }
@@ -1102,6 +1168,127 @@ int dsi_phy_conv_logical_to_phy_lane(
 			break;
 	}
 	return i;
+}
+
+
+/**
+ * dsi_phy_config_dynamic_refresh() - Configure dynamic refresh registers
+ * @phy:	DSI PHY handle
+ * @delay:	pipe delays for dynamic refresh
+ * @is_master:	Boolean to indicate if for master or slave.
+ */
+void dsi_phy_config_dynamic_refresh(struct msm_dsi_phy *phy,
+		struct dsi_dyn_clk_delay *delay,
+		bool is_master)
+{
+	struct dsi_phy_cfg *cfg;
+
+	if (!phy)
+		return;
+
+	mutex_lock(&phy->phy_lock);
+
+	cfg = &phy->cfg;
+	if (phy->hw.ops.dyn_refresh_ops.dyn_refresh_config)
+		phy->hw.ops.dyn_refresh_ops.dyn_refresh_config(&phy->hw, cfg,
+				is_master);
+	if (phy->hw.ops.dyn_refresh_ops.dyn_refresh_pipe_delay)
+		phy->hw.ops.dyn_refresh_ops.dyn_refresh_pipe_delay(
+				&phy->hw, delay);
+
+	mutex_unlock(&phy->phy_lock);
+}
+
+/**
+ * dsi_phy_dynamic_refresh_trigger() - trigger dynamic refresh
+ * @phy:	DSI PHY handle
+ * @is_master:	Boolean to indicate if for master or slave.
+ */
+void dsi_phy_dynamic_refresh_trigger(struct msm_dsi_phy *phy, bool is_master)
+{
+	u32 off;
+
+	if (!phy)
+		return;
+
+	mutex_lock(&phy->phy_lock);
+	/*
+	 * program PLL_SWI_INTF_SEL and SW_TRIGGER bit only for
+	 * master and program SYNC_MODE bit only for slave.
+	 */
+	if (is_master)
+		off = BIT(DYN_REFRESH_INTF_SEL) | BIT(DYN_REFRESH_SWI_CTRL) |
+			BIT(DYN_REFRESH_SW_TRIGGER);
+	else
+		off = BIT(DYN_REFRESH_SYNC_MODE) | BIT(DYN_REFRESH_SWI_CTRL);
+
+	if (phy->hw.ops.dyn_refresh_ops.dyn_refresh_helper)
+		phy->hw.ops.dyn_refresh_ops.dyn_refresh_helper(&phy->hw, off);
+
+	mutex_unlock(&phy->phy_lock);
+}
+
+/**
+ * dsi_phy_cache_phy_timings - cache the phy timings calculated as part of
+ *				dynamic refresh.
+ * @phy:	   DSI PHY Handle.
+ * @dst:	   Pointer to cache location.
+ * @size:	   Number of phy lane settings.
+ */
+int dsi_phy_dyn_refresh_cache_phy_timings(struct msm_dsi_phy *phy, u32 *dst,
+		u32 size)
+{
+	int rc = 0;
+
+	if (!phy || !dst || !size)
+		return -EINVAL;
+
+	if (phy->hw.ops.dyn_refresh_ops.cache_phy_timings) {
+		rc = phy->hw.ops.dyn_refresh_ops.cache_phy_timings(
+				&phy->cfg.timing, dst, size);
+
+		if (rc)
+			pr_err("failed to cache phy timings %d\n", rc);
+	}
+
+	return rc;
+}
+
+/**
+ * dsi_phy_dynamic_refresh_clear() - clear dynamic refresh config
+ * @phy:	DSI PHY handle
+ */
+void dsi_phy_dynamic_refresh_clear(struct msm_dsi_phy *phy)
+{
+	if (!phy)
+		return;
+
+	mutex_lock(&phy->phy_lock);
+
+	if (phy->hw.ops.dyn_refresh_ops.dyn_refresh_helper)
+		phy->hw.ops.dyn_refresh_ops.dyn_refresh_helper(&phy->hw, 0);
+
+	mutex_unlock(&phy->phy_lock);
+}
+
+/**
+ * dsi_phy_set_continuous_clk() - set/unset force clock lane HS request
+ * @phy:	DSI PHY handle
+ * @enable:	variable to control continuous clock
+ */
+void dsi_phy_set_continuous_clk(struct msm_dsi_phy *phy, bool enable)
+{
+	if (!phy)
+		return;
+
+	mutex_lock(&phy->phy_lock);
+
+	if (phy->hw.ops.set_continuous_clk)
+		phy->hw.ops.set_continuous_clk(&phy->hw, enable);
+	else
+		pr_warn("set_continuous_clk ops not present\n");
+
+	mutex_unlock(&phy->phy_lock);
 }
 
 void dsi_phy_drv_register(void)

@@ -192,8 +192,12 @@ struct drm_msm_gem_cpu_fini {
  */
 struct drm_msm_gem_submit_reloc {
 	__u32 submit_offset;  /* in, offset from submit_bo */
-	__u32 or;             /* in, value OR'd with result */
-	__s32 shift;          /* in, amount of left shift (can be negative) */
+#ifdef __cplusplus
+	__u32 or_val;
+#else
+	__u32 or; /* in, value OR'd with result */
+#endif
+	__s32  shift;          /* in, amount of left shift (can be negative) */
 	__u32 reloc_idx;      /* in, index of reloc_bo buffer */
 	__u64 reloc_offset;   /* in, offset from start of reloc_bo */
 };
@@ -359,11 +363,12 @@ struct drm_msm_event_resp {
 /**
  * struct drm_msm_power_ctrl: Payload to enable/disable the power vote
  * @enable: enable/disable the power vote
+ * @flags:  operation control flags, for future use
  */
 struct drm_msm_power_ctrl {
 	__u32 enable;
+	__u32 flags;
 };
-
 
 #define DRM_MSM_GET_PARAM              0x00
 /* placeholder:

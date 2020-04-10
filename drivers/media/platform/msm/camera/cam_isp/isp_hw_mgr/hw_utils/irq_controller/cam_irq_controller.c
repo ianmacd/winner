@@ -575,42 +575,42 @@ static bool cam_irq_controller_match_bit_mask(
 }
 
 static void cam_irq_controller_th_processing(
-    struct cam_irq_controller      *controller,
-    struct list_head               *th_list_head)
+	struct cam_irq_controller      *controller,
+	struct list_head               *th_list_head)
 {
-    struct cam_irq_evt_handler     *evt_handler = NULL;
-    struct cam_irq_th_payload      *th_payload = &controller->th_payload;
-    bool                            is_irq_match;
-    int                             rc = -EINVAL;
-    int                             i;
-    void                           *bh_cmd = NULL;
-    struct cam_irq_bh_api          *irq_bh_api = NULL;
+	struct cam_irq_evt_handler     *evt_handler = NULL;
+	struct cam_irq_th_payload      *th_payload = &controller->th_payload;
+	bool                            is_irq_match;
+	int                             rc = -EINVAL;
+	int                             i;
+	void                           *bh_cmd = NULL;
+	struct cam_irq_bh_api          *irq_bh_api = NULL;
 
-    CAM_DBG(CAM_IRQ_CTRL, "Enter");
+	CAM_DBG(CAM_IRQ_CTRL, "Enter");
 
-    if (list_empty(th_list_head))
-        return;
+	if (list_empty(th_list_head))
+		return;
 
-    list_for_each_entry(evt_handler, th_list_head, th_list_node) {
-        is_irq_match = cam_irq_controller_match_bit_mask(controller,
-            evt_handler);
+	list_for_each_entry(evt_handler, th_list_head, th_list_node) {
+		is_irq_match = cam_irq_controller_match_bit_mask(controller,
+			evt_handler);
 
-        if (!is_irq_match)
-            continue;
+		if (!is_irq_match)
+			continue;
 
-        CAM_DBG(CAM_IRQ_CTRL, "match found");
+		CAM_DBG(CAM_IRQ_CTRL, "match found");
 
-        cam_irq_th_payload_init(th_payload);
-        th_payload->handler_priv  = evt_handler->handler_priv;
-        th_payload->num_registers = controller->num_registers;
-        for (i = 0; i < controller->num_registers; i++) {
-            th_payload->evt_status_arr[i] =
-                controller->irq_status_arr[i] &
-                evt_handler->evt_bit_mask_arr[i];
-        }
+		cam_irq_th_payload_init(th_payload);
+		th_payload->handler_priv  = evt_handler->handler_priv;
+		th_payload->num_registers = controller->num_registers;
+		for (i = 0; i < controller->num_registers; i++) {
+			th_payload->evt_status_arr[i] =
+				controller->irq_status_arr[i] &
+				evt_handler->evt_bit_mask_arr[i];
+		}
 
-        irq_bh_api = &evt_handler->irq_bh_api;
-        bh_cmd = NULL;
+		irq_bh_api = &evt_handler->irq_bh_api;
+		bh_cmd = NULL;
 
         if (evt_handler->bottom_half_handler) {
             rc = irq_bh_api->get_bh_payload_func(
@@ -622,34 +622,34 @@ static void cam_irq_controller_th_processing(
             }
         }
 
-        /*
-         * irq_status_arr[0] is dummy argument passed. the entire
-         * status array is passed in th_payload.
-         */
-        if (evt_handler->top_half_handler)
-            rc = evt_handler->top_half_handler(
-                controller->irq_status_arr[0],
-                (void *)th_payload);
+		/*
+		 * irq_status_arr[0] is dummy argument passed. the entire
+		 * status array is passed in th_payload.
+		 */
+		if (evt_handler->top_half_handler)
+			rc = evt_handler->top_half_handler(
+				controller->irq_status_arr[0],
+				(void *)th_payload);
 
-        if (rc && bh_cmd) {
-            irq_bh_api->put_bh_payload_func(
-                evt_handler->bottom_half, &bh_cmd);
-            continue;
-        }
+		if (rc && bh_cmd) {
+			irq_bh_api->put_bh_payload_func(
+				evt_handler->bottom_half, &bh_cmd);
+			continue;
+		}
 
-        if (evt_handler->bottom_half_handler) {
-            CAM_DBG(CAM_IRQ_CTRL, "Enqueuing bottom half for %s",
-                controller->name);
-            irq_bh_api->bottom_half_enqueue_func(
-                evt_handler->bottom_half,
-                bh_cmd,
-                evt_handler->handler_priv,
-                th_payload->evt_payload_priv,
-                evt_handler->bottom_half_handler);
-        }
-    }
+		if (evt_handler->bottom_half_handler) {
+			CAM_DBG(CAM_IRQ_CTRL, "Enqueuing bottom half for %s",
+				controller->name);
+			irq_bh_api->bottom_half_enqueue_func(
+				evt_handler->bottom_half,
+				bh_cmd,
+				evt_handler->handler_priv,
+				th_payload->evt_payload_priv,
+				evt_handler->bottom_half_handler);
+		}
+	}
 
-    CAM_DBG(CAM_IRQ_CTRL, "Exit");
+	CAM_DBG(CAM_IRQ_CTRL, "Exit");
 }
 
 irqreturn_t cam_irq_controller_clear_and_mask(int irq_num, void *priv)

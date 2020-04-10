@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -490,6 +490,61 @@ int swr_get_logical_dev_num(struct swr_device *dev, u64 dev_id,
 EXPORT_SYMBOL(swr_get_logical_dev_num);
 
 /**
+ * swr_device_wakeup_vote - Wakeup master and slave devices from clock stop
+ * @dev: pointer to soundwire slave device
+ *
+ * This API will wake up soundwire master and slave device(s) from
+ * clock stop.
+ */
+int swr_device_wakeup_vote(struct swr_device *dev)
+{
+	int ret = 0;
+	struct swr_master *master = dev->master;
+
+	if (!master) {
+		pr_err("%s: Master is NULL\n", __func__);
+		return -EINVAL;
+	}
+	mutex_lock(&master->mlock);
+	if (master->device_wakeup_vote)
+		master->device_wakeup_vote(master);
+	else
+		ret = -EINVAL;
+	mutex_unlock(&master->mlock);
+
+	return ret;
+}
+EXPORT_SYMBOL(swr_device_wakeup_vote);
+
+/**
+ * swr_device_wakeup_unvote - Unvote Wakeup so that master and slave
+ * devices can go back to  clock stop
+ * @dev: pointer to soundwire slave device
+ *
+ * This API will remove vote for wakeup so that soundwire master and
+ * slave device(s) can go back to clock stop.
+ */
+int swr_device_wakeup_unvote(struct swr_device *dev)
+{
+	int ret = 0;
+	struct swr_master *master = dev->master;
+
+	if (!master) {
+		pr_err("%s: Master is NULL\n", __func__);
+		return -EINVAL;
+	}
+	mutex_lock(&master->mlock);
+	if (master->device_wakeup_unvote)
+		master->device_wakeup_unvote(master);
+	else
+		ret = -EINVAL;
+	mutex_unlock(&master->mlock);
+
+	return ret;
+}
+EXPORT_SYMBOL(swr_device_wakeup_unvote);
+
+/**
  * swr_read - read soundwire slave device registers
  * @dev: pointer to soundwire slave device
  * @dev_num: logical device num of soundwire slave device
@@ -950,10 +1005,14 @@ static int swr_device_match(struct device *dev, struct device_driver *driver)
 	if (!drv)
 		return -EINVAL;
 
-	if (dev->type == &swr_dev_type)
+	if (dev->type == &swr_dev_type) {
 		swr_dev = to_swr_device(dev);
-	else
+		if (!swr_dev)
+			return -EINVAL;
+	} else {
 		return 0;
+	}
+
 	if (drv->id_table)
 		return swr_match(drv->id_table, swr_dev) != NULL;
 

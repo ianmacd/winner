@@ -57,6 +57,7 @@
 #include "fts_lib/ftsTest.h"
 #include "fts_lib/ftsTime.h"
 #include "fts_lib/ftsTool.h"
+#include "linux/moduleparam.h"
 
 
 
@@ -133,6 +134,8 @@ static int fts_init_afterProbe(struct fts_ts_info *info);
 static int fts_mode_handler(struct fts_ts_info *info, int force);
 static int fts_command(struct fts_ts_info *info, unsigned char cmd);
 static int fts_chip_initialization(struct fts_ts_info *info);
+
+active_tp_setup(st);
 
 void touch_callback(unsigned int status)
 {
@@ -2768,7 +2771,7 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 			unsigned char *event)
 {
 	unsigned char touchId, touchcount;
-	int x, y, z;
+	int x, y;
 	int minor;
 	int major, distance;
 	u8 touchsize;
@@ -2787,9 +2790,6 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 
 	x = (event[2] << 4) | (event[4] & 0xF0) >> 4;
 	y = (event[3] << 4) | (event[4] & 0x0F);
-	z = (event[5] & 0x3F);
-	if (z == 0)
-		z = 10;
 
 	if (info->bdata->x_flip)
 		x = X_AXIS_MAX - x;
@@ -2816,7 +2816,6 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 	input_report_abs(info->input_dev, ABS_MT_POSITION_Y, y);
 	input_report_abs(info->input_dev, ABS_MT_TOUCH_MAJOR, major);
 	input_report_abs(info->input_dev, ABS_MT_TOUCH_MINOR, minor);
-	input_report_abs(info->input_dev, ABS_MT_PRESSURE, z);
 	input_report_abs(info->input_dev, ABS_MT_DISTANCE, distance);
 no_report:
 	return;
@@ -4018,6 +4017,19 @@ static void fts_resume_work(struct work_struct *work)
 
 	__pm_wakeup_event(&info->wakeup_source, HZ);
 
+	if (info->ts_pinctrl) {
+		/*
+		 * Pinctrl handle is optional. If pinctrl handle is found
+		 * let pins to be configured in active state. If not
+		 * found continue further without error.
+		 */
+		if (pinctrl_select_state(info->ts_pinctrl,
+					info->pinctrl_state_active) < 0) {
+			logError(1, "%s: Failed to select %s pinstate\n",
+				__func__, PINCTRL_STATE_ACTIVE);
+		}
+	}
+
 	info->resume_bit = 1;
 #ifdef USE_NOISE_PARAM
 	readNoiseParameters(noise_params);
@@ -4054,6 +4066,19 @@ static void fts_suspend_work(struct work_struct *work)
 	info->sensor_sleep = true;
 
 	fts_enableInterrupt();
+
+	if (info->ts_pinctrl) {
+		/*
+		 * Pinctrl handle is optional. If pinctrl handle is found
+		 * let pins to be configured in suspend state. If not
+		 * found continue further without error.
+		 */
+		if (pinctrl_select_state(info->ts_pinctrl,
+					info->pinctrl_state_suspend) < 0) {
+			logError(1, "%s: Failed to select %s pinstate\n",
+				__func__, PINCTRL_STATE_SUSPEND);
+		}
+	}
 }
 
 
@@ -4153,6 +4178,53 @@ static int fts_fb_state_chg_callback(struct notifier_block *nb,
 static struct notifier_block fts_noti_block = {
 	.notifier_call = fts_fb_state_chg_callback,
 };
+
+static int fts_pinctrl_init(struct fts_ts_info *info)
+{
+	int retval;
+
+	/* Get pinctrl if target uses pinctrl */
+	info->ts_pinctrl = devm_pinctrl_get(info->dev);
+	if (IS_ERR_OR_NULL(info->ts_pinctrl)) {
+		retval = PTR_ERR(info->ts_pinctrl);
+		logError(1, "Target does not use pinctrl %d\n", retval);
+		goto err_pinctrl_get;
+	}
+
+	info->pinctrl_state_active
+		= pinctrl_lookup_state(info->ts_pinctrl, PINCTRL_STATE_ACTIVE);
+	if (IS_ERR_OR_NULL(info->pinctrl_state_active)) {
+		retval = PTR_ERR(info->pinctrl_state_active);
+		logError(1, "Can not lookup %s pinstate %d\n",
+					PINCTRL_STATE_ACTIVE, retval);
+		goto err_pinctrl_lookup;
+	}
+
+	info->pinctrl_state_suspend
+		= pinctrl_lookup_state(info->ts_pinctrl, PINCTRL_STATE_SUSPEND);
+	if (IS_ERR_OR_NULL(info->pinctrl_state_suspend)) {
+		retval = PTR_ERR(info->pinctrl_state_suspend);
+		logError(1, "Can not lookup %s pinstate %d\n",
+					PINCTRL_STATE_SUSPEND, retval);
+		goto err_pinctrl_lookup;
+	}
+
+	info->pinctrl_state_release
+		= pinctrl_lookup_state(info->ts_pinctrl, PINCTRL_STATE_RELEASE);
+	if (IS_ERR_OR_NULL(info->pinctrl_state_release)) {
+		retval = PTR_ERR(info->pinctrl_state_release);
+		logError(1, "Can not lookup %s pinstate %d\n",
+					PINCTRL_STATE_RELEASE, retval);
+	}
+
+	return 0;
+
+err_pinctrl_lookup:
+	devm_pinctrl_put(info->ts_pinctrl);
+err_pinctrl_get:
+	info->ts_pinctrl = NULL;
+	return retval;
+}
 
 static int fts_get_reg(struct fts_ts_info *info, bool get)
 {
@@ -4365,6 +4437,7 @@ static int fts_probe(struct i2c_client *client,
 	struct device_node *dp = client->dev.of_node;
 	int retval;
 	int skip_5_1 = 0;
+	struct device_node *dt = client->dev.of_node;
 
 	logError(0, "%s %s: driver probe begin!\n", tag, __func__);
 
@@ -4372,6 +4445,9 @@ static int fts_probe(struct i2c_client *client,
 	openChannel(client);
 	logError(0, "%s driver ver. %s (built on)\n", tag, FTS_TS_DRV_VERSION);
 
+	if (st_check_assigned_tp(dt, "compatible",
+		"qcom,i2c-touch-active") < 0)
+		goto err_dt_not_match;
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		logError(1, "%s Unsupported I2C functionality\n", tag);
 		error = -EIO;
@@ -4390,6 +4466,14 @@ static int fts_probe(struct i2c_client *client,
 	info->client = client;
 
 	i2c_set_clientdata(client, info);
+
+	info->i2c_data = kmalloc(I2C_DATA_MAX_LEN, GFP_KERNEL);
+	if (info->i2c_data == NULL) {
+		error = -ENOMEM;
+		goto ProbeErrorExit_0P1;
+	}
+	info->i2c_data_len = I2C_DATA_MAX_LEN;
+
 	logError(0, "%s i2c address: %x\n", tag, client->addr);
 	info->dev = &info->client->dev;
 	if (dp) {
@@ -4427,6 +4511,21 @@ static int fts_probe(struct i2c_client *client,
 		goto ProbeErrorExit_2;
 	}
 	info->client->irq = gpio_to_irq(info->bdata->irq_gpio);
+
+	retval = fts_pinctrl_init(info);
+	if (!retval && info->ts_pinctrl) {
+		/*
+		 * Pinctrl handle is optional. If pinctrl handle is found
+		 * let pins to be configured in active state. If not
+		 * found continue further without error.
+		 */
+		retval = pinctrl_select_state(info->ts_pinctrl,
+						info->pinctrl_state_active);
+		if (retval < 0) {
+			logError(1, "%s: Failed to select %s pinstate %d\n",
+				__func__, PINCTRL_STATE_ACTIVE, retval);
+		}
+	}
 
 	logError(0, "%s SET Auto Fw Update:\n", tag);
 	info->fwu_workqueue = alloc_workqueue("fts-fwu-queue",
@@ -4488,8 +4587,6 @@ static int fts_probe(struct i2c_client *client,
 			AREA_MIN, AREA_MAX, 0, 0);
 	input_set_abs_params(info->input_dev, ABS_MT_TOUCH_MINOR,
 			AREA_MIN, AREA_MAX, 0, 0);
-	input_set_abs_params(info->input_dev, ABS_MT_PRESSURE,
-			PRESSURE_MIN, PRESSURE_MAX, 0, 0);
 
 #ifdef PHONE_GESTURE
 	input_set_capability(info->input_dev, EV_KEY, KEY_WAKEUP);
@@ -4677,6 +4774,17 @@ ProbeErrorExit_4:
 	wakeup_source_trash(&info->wakeup_source);
 
 ProbeErrorExit_3:
+	if (info->ts_pinctrl) {
+		if (IS_ERR_OR_NULL(info->pinctrl_state_release)) {
+			devm_pinctrl_put(info->ts_pinctrl);
+			info->ts_pinctrl = NULL;
+		} else {
+			if (pinctrl_select_state(info->ts_pinctrl,
+						info->pinctrl_state_release))
+				logError(1, "%s:Failed to select %s pinstate\n",
+					__func__, PINCTRL_STATE_RELEASE);
+		}
+	}
 	fts_enable_reg(info, false);
 	fts_gpio_setup(info->bdata->irq_gpio, false, 0, 0);
 	fts_gpio_setup(info->bdata->reset_gpio, false, 0, 0);
@@ -4685,9 +4793,12 @@ ProbeErrorExit_2:
 	fts_get_reg(info, false);
 
 ProbeErrorExit_1:
+	kfree(info->i2c_data);
+ProbeErrorExit_0P1:
 	kfree(info);
 
 ProbeErrorExit_0:
+err_dt_not_match:
 	logError(1, "%s Probe Failed!\n", tag);
 
 	return error;
@@ -4738,6 +4849,15 @@ static int fts_remove(struct i2c_client *client)
 	wakeup_source_trash(&info->wakeup_source);
 	destroy_workqueue(info->fwu_workqueue);
 
+	if (info->ts_pinctrl) {
+		if (IS_ERR_OR_NULL(info->pinctrl_state_release)) {
+			devm_pinctrl_put(info->ts_pinctrl);
+			info->ts_pinctrl = NULL;
+		} else {
+			pinctrl_select_state(info->ts_pinctrl,
+						info->pinctrl_state_release);
+		}
+	}
 	fts_enable_reg(info, false);
 	fts_gpio_setup(info->bdata->irq_gpio, false, 0, 0);
 	fts_gpio_setup(info->bdata->reset_gpio, false, 0, 0);
@@ -4745,6 +4865,7 @@ static int fts_remove(struct i2c_client *client)
 	fts_get_reg(info, false);
 
 	/* free all */
+	kfree(info->i2c_data);
 	kfree(info);
 
 	return OK;

@@ -161,8 +161,8 @@
 
 #define EXP_FN_WORK_DELAY_MS 1000
 
-#define CMD_STR_LEN          32
-
+#define CMD_STR_LEN		32
+#define I2C_DATA_MAX_LEN	32
 
 #ifdef SCRIPTLESS
 /*
@@ -173,6 +173,10 @@
 #endif
 
 #define TSP_BUF_SIZE         4096
+
+#define PINCTRL_STATE_ACTIVE    "pmx_ts_active"
+#define PINCTRL_STATE_SUSPEND   "pmx_ts_suspend"
+#define PINCTRL_STATE_RELEASE   "pmx_ts_release"
 
 /*add by guchong*/
 #ifdef PHONE_GESTURE
@@ -243,6 +247,11 @@ struct fts_ts_info {
 	struct workqueue_struct  *fwu_workqueue;
 	struct completion        cmd_done;
 
+	struct pinctrl *ts_pinctrl;
+	struct pinctrl_state *pinctrl_state_active;
+	struct pinctrl_state *pinctrl_state_suspend;
+	struct pinctrl_state *pinctrl_state_release;
+
 	event_dispatch_handler_t *event_dispatch_table;
 
 	struct attribute_group    attrs;
@@ -296,6 +305,9 @@ struct fts_ts_info {
 	int edge_rej_enabled;
 	int corner_rej_enabled;
 	int edge_palm_rej_enabled;
+
+	uint8_t *i2c_data;
+	uint8_t i2c_data_len;
 };
 
 extern struct chipInfo ftsInfo;

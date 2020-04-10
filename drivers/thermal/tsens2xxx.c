@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -96,9 +96,21 @@ static int tsens2xxx_get_temp(struct tsens_sensor *sensor, int *temp)
 	code = readl_relaxed_no_log(trdy);
 	if (!((code & TSENS_TM_TRDY_FIRST_ROUND_COMPLETE) >>
 			TSENS_TM_TRDY_FIRST_ROUND_COMPLETE_SHIFT)) {
-		pr_err("TSENS device first round not complete0x%x\n", code);
+		pr_err("tsens device first round not complete0x%x, ctr is %d\n",
+			code, tmdev->trdy_fail_ctr);
+		tmdev->trdy_fail_ctr++;
+
+		if (tmdev->trdy_fail_ctr >= 50) {
+			if (tmdev->ops->dbg)
+				tmdev->ops->dbg(tmdev, 0,
+					TSENS_DBG_LOG_BUS_ID_DATA, NULL);
+			BUG();
+		}
+
 		return -ENODATA;
 	}
+
+	tmdev->trdy_fail_ctr = 0;
 
 	code = readl_relaxed_no_log(sensor_addr +
 			(sensor->hw_id << TSENS_STATUS_ADDR_OFFSET));
@@ -228,7 +240,7 @@ static int tsens2xxx_set_trip_temp(struct tsens_sensor *tm_sensor,
 		return -EINVAL;
 
 	pr_debug("%s: sensor:%d low_temp(mdegC):%d, high_temp(mdegC):%d\n",
-		__func__, tm_sensor->hw_id, low_temp, high_temp);
+			__func__, tm_sensor->hw_id, low_temp, high_temp);
 
 	spin_lock_irqsave(&tmdev->tsens_upp_low_lock, flags);
 
@@ -439,8 +451,8 @@ static irqreturn_t tsens_tm_irq_thread(int irq, void *data)
 					tm->sensor[i].hw_id);
 			/* Mask the corresponding interrupt for the sensors */
 			writel_relaxed(int_mask | int_mask_val,
-				TSENS_TM_UPPER_LOWER_INT_MASK(
-				tm->tsens_tm_addr));
+					TSENS_TM_UPPER_LOWER_INT_MASK(
+						tm->tsens_tm_addr));
 			/* Clear the corresponding sensors interrupt */
 			writel_relaxed(int_mask_val,
 				TSENS_TM_UPPER_LOWER_INT_CLEAR(
@@ -471,8 +483,8 @@ static irqreturn_t tsens_tm_irq_thread(int irq, void *data)
 			int_mask_val = (1 << tm->sensor[i].hw_id);
 			/* Mask the corresponding interrupt for the sensors */
 			writel_relaxed(int_mask | int_mask_val,
-				TSENS_TM_UPPER_LOWER_INT_MASK(
-				tm->tsens_tm_addr));
+					TSENS_TM_UPPER_LOWER_INT_MASK(
+						tm->tsens_tm_addr));
 			/* Clear the corresponding sensors interrupt */
 			writel_relaxed(int_mask_val,
 				TSENS_TM_UPPER_LOWER_INT_CLEAR(

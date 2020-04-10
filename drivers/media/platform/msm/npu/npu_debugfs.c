@@ -169,7 +169,7 @@ static ssize_t npu_debug_reg_read(struct file *file,
 		if (!debugfs->buf)
 			return -ENOMEM;
 
-		ptr = npu_dev->npu_io.base + debugfs->reg_off;
+		ptr = npu_dev->core_io.base + debugfs->reg_off;
 		tot = 0;
 		off = (int)debugfs->reg_off;
 
@@ -183,7 +183,7 @@ static ssize_t npu_debug_reg_read(struct file *file,
 			len = scnprintf(debugfs->buf + tot,
 				debugfs->buf_len - tot, "0x%08x: %s\n",
 				((int) (unsigned long) ptr) -
-				((int) (unsigned long) npu_dev->npu_io.base),
+				((int) (unsigned long) npu_dev->core_io.base),
 				dump_buf);
 
 			ptr += ROW_BYTES;
@@ -200,7 +200,7 @@ static ssize_t npu_debug_reg_read(struct file *file,
 		return 0; /* done reading */
 
 	len = min(count, debugfs->buf_len - (size_t) *ppos);
-	pr_debug("read %zi %zi", count, debugfs->buf_len - (size_t) *ppos);
+	pr_debug("read %zi %zi\n", count, debugfs->buf_len - (size_t) *ppos);
 	if (copy_to_user(user_buf, debugfs->buf + *ppos, len)) {
 		pr_err("failed to copy to user\n");
 		return -EFAULT;
@@ -305,7 +305,8 @@ static ssize_t npu_debug_log_read(struct file *file,
 
 			if (copy_to_user(dst_addr, src_addr,
 				remaining_to_end)) {
-				pr_err("%s failed to copy to user", __func__);
+				pr_err("%s failed to copy to user\n", __func__);
+				mutex_unlock(&debugfs->log_lock);
 				return -EFAULT;
 			}
 			src_addr = debugfs->log_buf;
@@ -313,7 +314,8 @@ static ssize_t npu_debug_log_read(struct file *file,
 			if (copy_to_user(dst_addr, src_addr,
 				debugfs->log_num_bytes_buffered -
 				remaining_to_end)) {
-				pr_err("%s failed to copy to user", __func__);
+				pr_err("%s failed to copy to user\n", __func__);
+				mutex_unlock(&debugfs->log_lock);
 				return -EFAULT;
 			}
 			debugfs->log_read_index =
@@ -323,7 +325,8 @@ static ssize_t npu_debug_log_read(struct file *file,
 			if (copy_to_user(user_buf, (debugfs->log_buf +
 				debugfs->log_read_index),
 				debugfs->log_num_bytes_buffered)) {
-				pr_err("%s failed to copy to user", __func__);
+				pr_err("%s failed to copy to user\n", __func__);
+				mutex_unlock(&debugfs->log_lock);
 				return -EFAULT;
 			}
 			debugfs->log_read_index +=
@@ -375,7 +378,7 @@ static ssize_t npu_debug_ctrl_write(struct file *file,
 			pr_info("error in fw_init\n");
 	} else if (strcmp(buf, "off") == 0) {
 		pr_info("triggering fw_deinit\n");
-		fw_deinit(npu_dev, false);
+		fw_deinit(npu_dev, false, true);
 	} else if (strcmp(buf, "ssr") == 0) {
 		pr_info("trigger error irq\n");
 		if (npu_enable_core_power(npu_dev))

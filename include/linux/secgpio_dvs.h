@@ -7,8 +7,6 @@
 
 #include <linux/types.h>
 
-#define SECGPIO_SLEEP_DEBUGGING
-
 enum gdvs_phone_status {
 	PHONE_INIT = 0,
 	PHONE_SLEEP,
@@ -60,9 +58,7 @@ struct gpio_dvs {
 	unsigned int count;
 	bool check_init;
 	bool check_sleep;
-	int requested_gpio;
 	void (*check_gpio_status)(unsigned char phonestate);
-	int (*read_gpio)(int gpionum);
 #ifdef SECGPIO_SLEEP_DEBUGGING
 	struct sleepdebug_gpiotable *sdebugtable;
 	void (*set_sleepgpio)(void);

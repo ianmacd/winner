@@ -262,6 +262,7 @@ int rtc6213n_fops_open(struct file *file)
 		/* powerconfig */
 		/* Enable FM */
 		radio->registers[POWERCFG] = POWERCFG_CSR0_ENABLE;
+		radio->registers[POWERCFG] |= (radio->blend_ofs << 8);
 		retval = rtc6213n_set_register(radio, POWERCFG);
 		if (retval < 0)
 			goto done;
@@ -621,6 +622,16 @@ static int rtc6213n_i2c_probe(struct i2c_client *client,
 		dev_info(&client->dev, "%s: can not find the blend level in the dt\n",
 		__func__);
 	}
+
+	if (!of_property_read_u32(client->dev.of_node, "blendofs", &radio->blend_ofs)) {
+		dev_info(&client->dev, "%s: blend_ofs = %d\n", __func__,
+				radio->blend_ofs);
+	} else {
+		radio->blend_ofs = 0;
+		dev_info(&client->dev, "%s: can not find the blend level in the dt\n",
+		__func__);
+	}
+
 
 	/* mark Seek/Tune Complete Interrupt enabled */
 	radio->stci_enabled = true;

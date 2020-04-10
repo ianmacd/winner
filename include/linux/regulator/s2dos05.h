@@ -194,6 +194,7 @@ int msm_drm_unregister_notifier_client(struct notifier_block *nb);
 #if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT)
 int enable_sub_fd_store(int enable);
 int enable_sub_fd_show(void);
+int s2mpb02_recovery(int pmic_id);
 #endif /* CONFIG_SEC_WINNERLTE_PROJECT */
 #endif /* CONFIG_SEC_FACTORY */
 

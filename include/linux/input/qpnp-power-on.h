@@ -19,8 +19,8 @@
 
 /**
  * enum pon_trigger_source: List of PON trigger sources
- * %PON_SMPL:		PON triggered by SMPL - Sudden Momentary Power Loss
- * %PON_RTC:		PON triggered by RTC alarm
+ * %PON_SMPL:		PON triggered by Sudden Momentary Power Loss (SMPL)
+ * %PON_RTC:		PON triggered by real-time clock (RTC) alarm
  * %PON_DC_CHG:		PON triggered by insertion of DC charger
  * %PON_USB_CHG:	PON triggered by insertion of USB
  * %PON_PON1:		PON triggered by other PMIC (multi-PMIC option)
@@ -43,6 +43,7 @@ enum pon_trigger_source {
  * %PON_POWER_OFF_WARM_RESET:        Reset the MSM but not all PMIC peripherals
  * %PON_POWER_OFF_SHUTDOWN:          Shutdown the MSM and PMIC completely
  * %PON_POWER_OFF_HARD_RESET:        Reset the MSM and all PMIC peripherals
+ * %PON_POWER_OFF_MAX_TYPE:          Reserved, not used
  */
 enum pon_power_off_type {
 	PON_POWER_OFF_RESERVED		= 0x00,
@@ -65,6 +66,8 @@ enum pon_restart_reason {
 	PON_RESTART_REASON_OEM_MIN		= 0x20,
 	PON_RESTART_REASON_OEM_MAX		= 0x3f,
 /* CONFIG_SEC_BSP */
+
+	PON_RESTART_REASON_CP_CRASH		= 0x12,
 	PON_RESTART_REASON_MANUAL_RESET = 0x13,
 	PON_RESTART_REASON_NORMALBOOT		= 0x14,
 	PON_RESTART_REASON_DOWNLOAD		= 0x15,
@@ -115,6 +118,9 @@ enum pon_restart_reason {
 	PON_RESTART_REASON_DUMP_SINK_BOOTDEV = 0x4D,
 	PON_RESTART_REASON_DUMP_SINK_SDCARD = 0x4E,
 	PON_RESTART_REASON_DUMP_SINK_USB = 0x4F,
+#if defined(CONFIG_SEC_QUEST_UEFI_ENHENCEMENT)
+	PON_RESTART_REASON_QUEST_NMCHECKER_START = 0x50,
+#endif
 	PON_RESTART_REASON_MAX			= 0x80
 };
 
@@ -123,6 +129,7 @@ int qpnp_pon_check_chg_det(void);
 ssize_t sec_get_pwrsrc(char *buf);
 int qpnp_control_s2_reset_onoff(int on);
 int qpnp_get_s2_reset_onoff(void);
+char* qpnp_pon_get_off_reason(void);
 #endif
 
 #ifdef CONFIG_INPUT_QPNP_POWER_ON
@@ -142,7 +149,10 @@ static int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
 {
 	return -ENODEV;
 }
-static inline int qpnp_pon_is_warm_reset(void) { return -ENODEV; }
+static inline int qpnp_pon_is_warm_reset(void)
+{
+	return -ENODEV;
+}
 static inline int qpnp_pon_trigger_config(enum pon_trigger_source pon_src,
 							bool enable)
 {

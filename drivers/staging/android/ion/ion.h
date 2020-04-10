@@ -2,7 +2,7 @@
  * drivers/staging/android/ion/ion.h
  *
  * Copyright (C) 2011 Google, Inc.
- * Copyright (c) 2011-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2019, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -39,6 +39,7 @@
 #define ION_CAMERA_HEAP_NAME    "camera_preview"
 #define ION_SPSS_HEAP_NAME	"spss"
 #define ION_SECURE_CARVEOUT_HEAP_NAME	"secure_carveout"
+#define ION_USER_CONTIG_HEAP_NAME	"user_contig"
 #define ION_QSECOM_HEAP_NAME	"qsecom"
 #define ION_QSECOM_TA_HEAP_NAME	"qsecom_ta"
 #define ION_SECURE_HEAP_NAME	"secure_heap"
@@ -493,5 +494,7 @@ int ion_walk_heaps(int heap_id, enum ion_heap_type type, void *data,
 long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 
 int ion_query_heaps(struct ion_heap_query *query);
+
+unsigned int get_ion_system_heap_id(void);
 
 #endif /* _ION_H */

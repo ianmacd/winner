@@ -8,6 +8,9 @@ struct sk_buff;
 
 /* endpoint node id auto assignment */
 #define QRTR_EP_NID_AUTO (-1)
+#define QRTR_EP_NET_ID_AUTO (1)
+
+#define QRTR_DEL_PROC_MAGIC	0xe111
 
 /**
  * struct qrtr_endpoint - endpoint handle
@@ -23,24 +26,14 @@ struct qrtr_endpoint {
 	struct qrtr_node *node;
 };
 
-int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid);
+int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int net_id,
+			   bool rt);
 
 void qrtr_endpoint_unregister(struct qrtr_endpoint *ep);
 
 int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len);
 
-struct qrtr_dbg_tx_cb {
-	char task[TASK_COMM_LEN];
-	pid_t pid;
-	u64 ns;
-};
-#define QRTR_DBG_TX_CB(skb)	\
-	((struct qrtr_dbg_tx_cb *)((skb)->cb))
-
-#define QRTR_DBG_RX_CB(skb)	\
-	((struct qrtr_cb *)((skb)->cb))
-
-#define QRTR_TIME_LIMIT_NS 500000000 /* 500 msec */
+int qrtr_peek_pkt_size(const void *data);
 
 #ifndef __IPC_SUB_IOCTL
 #define __IPC_SUB_IOCTL

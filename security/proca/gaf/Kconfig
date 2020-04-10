@@ -1,7 +1,7 @@
 # When adding new entries keep the list in alphabetical order
 choice
 	prompt "Version of GAF structure"
-	default GAF_V6 if PROCA
+	default GAF_V5 if PROCA
 	default GAF_V4 if FIVE
 	default GAF_V3
 	config GAF_V3

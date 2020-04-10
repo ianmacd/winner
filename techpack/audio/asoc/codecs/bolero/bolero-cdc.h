@@ -45,7 +45,9 @@ enum {
 	BOLERO_MACRO_EVT_IMPED_FALSE, /* for imped false */
 	BOLERO_MACRO_EVT_SSR_DOWN,
 	BOLERO_MACRO_EVT_SSR_UP,
-	BOLERO_MACRO_EVT_WAIT_VA_CLK_RESET
+	BOLERO_MACRO_EVT_WAIT_VA_CLK_RESET,
+	BOLERO_MACRO_EVT_CLK_RESET,
+	BOLERO_MACRO_EVT_REG_WAKE_IRQ
 };
 
 struct macro_ops {
@@ -57,6 +59,7 @@ struct macro_ops {
 	int (*mclk_fn)(struct device *dev, bool enable);
 	int (*event_handler)(struct snd_soc_codec *codec, u16 event,
 			     u32 data);
+	int (*reg_wake_irq)(struct snd_soc_codec *codec, u32 data);
 	char __iomem *io_base;
 };
 
@@ -71,7 +74,9 @@ int bolero_request_clock(struct device *dev, u16 macro_id,
 int bolero_info_create_codec_entry(
 		struct snd_info_entry *codec_root,
 		struct snd_soc_codec *codec);
+int bolero_register_wake_irq(struct snd_soc_codec *codec, u32 data);
 void bolero_clear_amic_tx_hold(struct device *dev, u16 adc_n);
+void bolero_wsa_pa_on(struct device *dev);
 #else
 static inline int bolero_register_macro(struct device *dev,
 					u16 macro_id,
@@ -105,6 +110,16 @@ static int bolero_info_create_codec_entry(
 }
 
 static inline void bolero_clear_amic_tx_hold(struct device *dev, u16 adc_n)
+{
+}
+
+static inline int bolero_register_wake_irq(struct snd_soc_codec *codec,
+					   u32 data)
+{
+	return 0;
+}
+
+static void bolero_wsa_pa_on(struct device *dev)
 {
 }
 #endif /* CONFIG_SND_SOC_BOLERO */

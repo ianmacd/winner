@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  * Copyright (C) 2006-2007 Adam Belay <abelay@novell.com>
  * Copyright (C) 2009 Intel Corporation
  *
@@ -58,9 +58,8 @@
 #endif
 #endif
 
-#ifdef CONFIG_SEC_DEBUG_POWER_LOG
+#ifdef CONFIG_SEC_DEBUG
 #include <linux/sec_debug.h>
-#include <linux/sec_debug_summary.h>
 #endif
 
 #ifdef CONFIG_SEC_PM
@@ -162,13 +161,14 @@ static DEFINE_PER_CPU(struct lpm_cpu*, cpu_lpm);
 static bool suspend_in_progress;
 static struct hrtimer lpm_hrtimer;
 static DEFINE_PER_CPU(struct hrtimer, histtimer);
+static DEFINE_PER_CPU(struct hrtimer, biastimer);
 static struct lpm_debug *lpm_debug;
 static phys_addr_t lpm_debug_phys;
 static const int num_dbg_elements = 0x100;
 
 static void cluster_unprepare(struct lpm_cluster *cluster,
 		const struct cpumask *cpu, int child_idx, bool from_idle,
-		int64_t time);
+		int64_t time, bool success);
 static void cluster_prepare(struct lpm_cluster *cluster,
 		const struct cpumask *cpu, int child_idx, bool from_idle,
 		int64_t time);
@@ -386,7 +386,8 @@ static int lpm_starting_cpu(unsigned int cpu)
 	update_debug_pc_event(CPU_HP_STARTING, cpu,
 				cluster->num_children_in_sync.bits[0],
 				cluster->child_cpus.bits[0], false);
-	cluster_unprepare(cluster, get_cpu_mask(cpu), NR_LPM_LEVELS, false, 0);
+	cluster_unprepare(cluster, get_cpu_mask(cpu), NR_LPM_LEVELS, false,
+						0, true);
 	return 0;
 }
 
@@ -492,6 +493,34 @@ static void msm_pm_set_timer(uint32_t modified_time_us)
 
 	lpm_hrtimer.function = lpm_hrtimer_cb;
 	hrtimer_start(&lpm_hrtimer, modified_ktime, HRTIMER_MODE_REL_PINNED);
+}
+
+static void biastimer_cancel(void)
+{
+	unsigned int cpu = raw_smp_processor_id();
+	struct hrtimer *cpu_biastimer = &per_cpu(biastimer, cpu);
+	ktime_t time_rem;
+
+	time_rem = hrtimer_get_remaining(cpu_biastimer);
+	if (ktime_to_us(time_rem) <= 0)
+		return;
+
+	hrtimer_try_to_cancel(cpu_biastimer);
+}
+
+static enum hrtimer_restart biastimer_fn(struct hrtimer *h)
+{
+	return HRTIMER_NORESTART;
+}
+
+static void biastimer_start(uint32_t time_ns)
+{
+	ktime_t bias_ktime = ns_to_ktime(time_ns);
+	unsigned int cpu = raw_smp_processor_id();
+	struct hrtimer *cpu_biastimer = &per_cpu(biastimer, cpu);
+
+	cpu_biastimer->function = biastimer_fn;
+	hrtimer_start(cpu_biastimer, bias_ktime, HRTIMER_MODE_REL_PINNED);
 }
 
 static uint64_t lpm_cpuidle_predict(struct cpuidle_device *dev,
@@ -654,15 +683,22 @@ static void clear_predict_history(void)
 
 static void update_history(struct cpuidle_device *dev, int idx);
 
-static inline bool is_cpu_biased(int cpu)
+static inline bool is_cpu_biased(int cpu, uint64_t *bias_time)
 {
 	u64 now = sched_clock();
 	u64 last = sched_get_cpu_last_busy_time(cpu);
+	u64 diff = 0;
 
 	if (!last)
 		return false;
 
-	return (now - last) < pm_qos_request(PM_QOS_HIST_BIAS);
+	diff = now - last;
+	if (diff < BIAS_HYST) {
+		*bias_time = BIAS_HYST - diff;
+		return true;
+	}
+
+	return false;
 }
 
 static int cpu_power_select(struct cpuidle_device *dev,
@@ -682,6 +718,7 @@ static int cpu_power_select(struct cpuidle_device *dev,
 	uint32_t next_wakeup_us = (uint32_t)sleep_us;
 	uint32_t min_residency, max_residency;
 	struct power_params *pwr_params;
+	uint64_t bias_time = 0;
 
 	if ((sleep_disabled && !cpu_isolated(dev->cpu)) || sleep_us < 0)
 		return best_level;
@@ -690,8 +727,10 @@ static int cpu_power_select(struct cpuidle_device *dev,
 
 	next_event_us = (uint32_t)(ktime_to_us(get_next_event_time(dev->cpu)));
 
-	if (is_cpu_biased(dev->cpu) && (!cpu_isolated(dev->cpu)))
+	if (is_cpu_biased(dev->cpu, &bias_time) && (!cpu_isolated(dev->cpu))) {
+		cpu->bias = bias_time;
 		goto done_select;
+	}
 
 	for (i = 0; i < cpu->nlevels; i++) {
 		bool allow;
@@ -1233,7 +1272,7 @@ failed:
 
 static void cluster_unprepare(struct lpm_cluster *cluster,
 		const struct cpumask *cpu, int child_idx, bool from_idle,
-		int64_t end_time)
+		int64_t end_time, bool success)
 {
 	struct lpm_cluster_level *level;
 	bool first_cpu;
@@ -1270,13 +1309,13 @@ static void cluster_unprepare(struct lpm_cluster *cluster,
 	if (cluster->stats->sleep_time)
 		cluster->stats->sleep_time = end_time -
 			cluster->stats->sleep_time;
-	lpm_stats_cluster_exit(cluster->stats, cluster->last_level, true);
+	lpm_stats_cluster_exit(cluster->stats, cluster->last_level, success);
 
 	level = &cluster->levels[cluster->last_level];
 
 	if (level->notify_rpm)
 		if (sys_pm_ops && sys_pm_ops->exit)
-			sys_pm_ops->exit();
+			sys_pm_ops->exit(success);
 
 	update_debug_pc_event(CLUSTER_EXIT, cluster->last_level,
 			cluster->num_children_in_sync.bits[0],
@@ -1300,7 +1339,7 @@ static void cluster_unprepare(struct lpm_cluster *cluster,
 		update_cluster_history(&cluster->history, last_level);
 
 	cluster_unprepare(cluster->parent, &cluster->child_cpus,
-			last_level, from_idle, end_time);
+			last_level, from_idle, end_time, success);
 unlock_return:
 	spin_unlock(&cluster->sync_lock);
 }
@@ -1382,6 +1421,8 @@ static bool psci_enter_sleep(struct lpm_cpu *cpu, int idx, bool from_idle)
 	 */
 
 	if (!idx) {
+		if (cpu->bias)
+			biastimer_start(cpu->bias);
 		stop_critical_timings();
 		wfi();
 		start_critical_timings();
@@ -1459,9 +1500,6 @@ static void update_history(struct cpuidle_device *dev, int idx)
 		history->hptr = 0;
 }
 
-#include <soc/qcom/watchdog.h>
-uint64_t tick_next_programmed_event(int cpu);
-
 static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 		struct cpuidle_driver *drv, int idx)
 {
@@ -1470,9 +1508,6 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 	const struct cpumask *cpumask = get_cpu_mask(dev->cpu);
 	ktime_t start = ktime_get();
 	uint64_t start_time = ktime_to_ns(start), end_time;
-    uint64_t programmed_time = tick_next_programmed_event(dev->cpu);
-    int64_t delta;
-
 
 	cpu_prepare(cpu, idx, true);
 	cluster_prepare(cpu->parent, cpumask, idx, true, start_time);
@@ -1486,25 +1521,18 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 /* FIXME : remove secdbg logging for reducing cpu hang issues */
 #if 0 //#ifdef CONFIG_SEC_DEBUG_POWER_LOG 
 	sec_debug_cpu_lpm_log(dev->cpu, idx, 0, 1);
-	secdbg_sched_msg("+Idle(%s)", cpu->levels[idx].name);
+	sec_debug_sched_msg("+Idle(%s)", cpu->levels[idx].name);
 	success = psci_enter_sleep(cpu, idx, true);
-	secdbg_sched_msg("-Idle(%s)", cpu->levels[idx].name);
+	sec_debug_sched_msg("-Idle(%s)", cpu->levels[idx].name);
 #else
 	success = psci_enter_sleep(cpu, idx, true);
 #endif
 
 exit:
 	end_time = ktime_to_ns(ktime_get());
-
-    delta = end_time - programmed_time;
-    if ((idx>0) && (programmed_time != KTIME_MAX) && (delta > 3000000000 /* 3secs */)) {
-		pr_err("[%s] programmed : %lld, end : %lld, delta : %lld\n", __func__, programmed_time, end_time, delta);
-        msm_trigger_wdog_bite();
-	}
-
 	lpm_stats_cpu_exit(idx, end_time, success);
 
-	cluster_unprepare(cpu->parent, cpumask, idx, true, end_time);
+	cluster_unprepare(cpu->parent, cpumask, idx, true, end_time, success);
 	cpu_unprepare(cpu, idx, true);
 	dev->last_residency = ktime_us_delta(ktime_get(), start);
 	update_history(dev, idx);
@@ -1519,6 +1547,10 @@ exit:
 		histtimer_cancel();
 		clusttimer_cancel();
 	}
+	if (cpu->bias) {
+		biastimer_cancel();
+		cpu->bias = 0;
+	}
 	local_irq_enable();
 	return idx;
 }
@@ -1528,6 +1560,7 @@ static void lpm_cpuidle_s2idle(struct cpuidle_device *dev,
 {
 	struct lpm_cpu *cpu = per_cpu(cpu_lpm, dev->cpu);
 	const struct cpumask *cpumask = get_cpu_mask(dev->cpu);
+	bool success = false;
 
 	for (; idx >= 0; idx--) {
 		if (lpm_cpu_mode_allow(dev->cpu, idx, false))
@@ -1541,9 +1574,9 @@ static void lpm_cpuidle_s2idle(struct cpuidle_device *dev,
 	cpu_prepare(cpu, idx, true);
 	cluster_prepare(cpu->parent, cpumask, idx, false, 0);
 
-	psci_enter_sleep(cpu, idx, false);
+	success = psci_enter_sleep(cpu, idx, false);
 
-	cluster_unprepare(cpu->parent, cpumask, idx, false, 0);
+	cluster_unprepare(cpu->parent, cpumask, idx, false, 0, success);
 	cpu_unprepare(cpu, idx, true);
 }
 
@@ -1795,6 +1828,7 @@ static int lpm_suspend_enter(suspend_state_t state)
 	struct lpm_cluster *cluster = lpm_cpu->parent;
 	const struct cpumask *cpumask = get_cpu_mask(cpu);
 	int idx;
+	bool success;
 
 	for (idx = lpm_cpu->nlevels - 1; idx >= 0; idx--) {
 		if (lpm_cpu_mode_allow(cpu, idx, false))
@@ -1809,17 +1843,17 @@ static int lpm_suspend_enter(suspend_state_t state)
 
 #ifdef CONFIG_SEC_DEBUG_SCHED_LOG
 	if (idx > 0)
-		secdbg_sched_msg("+Suspend(s:%d)", state);
+		sec_debug_sched_msg("+Suspend(s:%d)", state);
 #endif
 
-	psci_enter_sleep(lpm_cpu, idx, false);
+	success = psci_enter_sleep(lpm_cpu, idx, false);
 
 #ifdef CONFIG_SEC_DEBUG_SCHED_LOG
 	if (idx > 0)
-		secdbg_sched_msg("-Suspend(s:%d)", state);
+		sec_debug_sched_msg("-Suspend(s:%d)", state);
 #endif
 
-	cluster_unprepare(cluster, cpumask, idx, false, 0);
+	cluster_unprepare(cluster, cpumask, idx, false, 0, success);
 	cpu_unprepare(lpm_cpu, idx, false);
 	return 0;
 }
@@ -1868,6 +1902,8 @@ static int lpm_probe(struct platform_device *pdev)
 	hrtimer_init(&lpm_hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	for_each_possible_cpu(cpu) {
 		cpu_histtimer = &per_cpu(histtimer, cpu);
+		hrtimer_init(cpu_histtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		cpu_histtimer = &per_cpu(biastimer, cpu);
 		hrtimer_init(cpu_histtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	}
 

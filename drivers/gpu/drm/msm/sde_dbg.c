@@ -252,6 +252,7 @@ static struct sde_dbg_base {
 	struct sde_dbg_vbif_debug_bus dbgbus_vbif_rt;
 	struct sde_dbg_dsi_debug_bus dbgbus_dsi;
 	bool dump_all;
+	bool dump_secure;
 	bool dsi_dbg_bus;
 	u32 debugfs_ctrl;
 
@@ -3465,7 +3466,7 @@ static void _sde_dump_reg(const char *dump_name, u32 reg_dump_flag,
 
 		if (dump_mem && *dump_mem) {
 			dump_addr = *dump_mem;
-			dev_info(sde_dbg_base.dev,
+			dev_dbg(sde_dbg_base.dev,
 				"%s: start_addr:0x%pK len:0x%x reg_offset=0x%lx\n",
 				dump_name, dump_addr, len_padded,
 				(unsigned long)(addr - base_addr));
@@ -3548,25 +3549,49 @@ static int _sde_dump_reg_range_cmp(void *priv, struct list_head *a,
 	return ar->offset.start - br->offset.start;
 }
 
+static const char *const exclude_modules[] = {
+	"vbif_rt",
+	"vbif_nrt",
+	"wb_2",
+	NULL
+};
+
+static bool is_block_exclude(char **modules, char *name)
+{
+	char **ptr = modules;
+
+	while (*ptr != NULL) {
+		if (!strcmp(name, *ptr))
+			return true;
+		++ptr;
+	}
+	return false;
+}
+
 /**
  * _sde_dump_reg_by_ranges - dump ranges or full range of the register blk base
  * @dbg: register blk base structure
  * @reg_dump_flag: dump target, memory, kernel log, or both
  */
 static void _sde_dump_reg_by_ranges(struct sde_dbg_reg_base *dbg,
-	u32 reg_dump_flag)
+	u32 reg_dump_flag, bool dump_secure)
 {
 	char *addr;
 	size_t len;
 	struct sde_dbg_reg_range *range_node;
+	bool in_log = false;
 
 	if (!dbg || !(dbg->base || dbg->cb)) {
 		pr_err("dbg base is null!\n");
 		return;
 	}
 
-	dev_info(sde_dbg_base.dev, "%s:=========%s DUMP=========\n", __func__,
-			dbg->name);
+	in_log = reg_dump_flag & SDE_DBG_DUMP_IN_LOG;
+
+	if (in_log)
+		dev_info(sde_dbg_base.dev, "%s:========= %s DUMP=========\n",
+			__func__, dbg->name);
+
 	if (dbg->cb) {
 		dbg->cb(dbg->cb_ptr);
 	/* If there is a list to dump the registers by ranges, use the ranges */
@@ -3577,6 +3602,12 @@ static void _sde_dump_reg_by_ranges(struct sde_dbg_reg_base *dbg,
 			len = _sde_dbg_get_dump_range(&range_node->offset,
 				dbg->max_offset);
 			addr = dbg->base + range_node->offset.start;
+
+			if (dump_secure &&
+				is_block_exclude((char **)exclude_modules,
+				range_node->range_name))
+				continue;
+
 			pr_debug("%s: range_base=0x%pK start=0x%x end=0x%x\n",
 				range_node->range_name,
 				addr, range_node->offset.start,
@@ -3588,10 +3619,12 @@ static void _sde_dump_reg_by_ranges(struct sde_dbg_reg_base *dbg,
 		}
 	} else {
 		/* If there is no list to dump ranges, dump all registers */
-		dev_info(sde_dbg_base.dev,
+		if (in_log) {
+			dev_info(sde_dbg_base.dev,
 				"Ranges not found, will dump full registers\n");
-		dev_info(sde_dbg_base.dev, "base:0x%pK len:0x%zx\n", dbg->base,
-				dbg->max_offset);
+			dev_info(sde_dbg_base.dev, "base:0x%pK len:0x%zx\n",
+				dbg->base, dbg->max_offset);
+		}
 		addr = dbg->base;
 		len = dbg->max_offset;
 		_sde_dump_reg(dbg->name, reg_dump_flag, dbg->base, addr, len,
@@ -3603,7 +3636,7 @@ static void _sde_dump_reg_by_ranges(struct sde_dbg_reg_base *dbg,
  * _sde_dump_reg_by_blk - dump a named register base region
  * @blk_name: register blk name
  */
-static void _sde_dump_reg_by_blk(const char *blk_name)
+static void _sde_dump_reg_by_blk(const char *blk_name, bool dump_secure)
 {
 	struct sde_dbg_base *dbg_base = &sde_dbg_base;
 	struct sde_dbg_reg_base *blk_base;
@@ -3615,7 +3648,7 @@ static void _sde_dump_reg_by_blk(const char *blk_name)
 		if (strlen(blk_base->name) &&
 			!strcmp(blk_base->name, blk_name)) {
 			_sde_dump_reg_by_ranges(blk_base,
-				dbg_base->enable_reg_dump);
+				dbg_base->enable_reg_dump, dump_secure);
 			break;
 		}
 	}
@@ -3624,7 +3657,7 @@ static void _sde_dump_reg_by_blk(const char *blk_name)
 /**
  * _sde_dump_reg_all - dump all register regions
  */
-static void _sde_dump_reg_all(void)
+static void _sde_dump_reg_all(bool dump_secure)
 {
 	struct sde_dbg_base *dbg_base = &sde_dbg_base;
 	struct sde_dbg_reg_base *blk_base;
@@ -3632,9 +3665,18 @@ static void _sde_dump_reg_all(void)
 	if (!dbg_base)
 		return;
 
-	list_for_each_entry(blk_base, &dbg_base->reg_base_list, reg_base_head)
-		if (strlen(blk_base->name))
-			_sde_dump_reg_by_blk(blk_base->name);
+	list_for_each_entry(blk_base, &dbg_base->reg_base_list, reg_base_head) {
+
+		if (!strlen(blk_base->name))
+			continue;
+
+		if (dump_secure &&
+			is_block_exclude((char **)exclude_modules,
+			blk_base->name))
+			continue;
+
+		_sde_dump_reg_by_blk(blk_base->name, dump_secure);
+	}
 }
 
 /**
@@ -3704,9 +3746,10 @@ static void _sde_dbg_dump_sde_dbg_bus(struct sde_dbg_sde_debug_bus *bus)
 
 		if (*dump_mem) {
 			dump_addr = *dump_mem;
-			dev_info(sde_dbg_base.dev,
-				"%s: start_addr:0x%pK len:0x%x\n",
-				__func__, dump_addr, list_size);
+			if (in_log)
+				dev_info(sde_dbg_base.dev,
+					"%s: start_addr:0x%pK len:0x%x\n",
+					__func__, dump_addr, list_size);
 		} else {
 			in_mem = false;
 			pr_err("dump_mem: allocation fails\n");
@@ -3865,9 +3908,10 @@ static void _sde_dbg_dump_vbif_dbg_bus(struct sde_dbg_vbif_debug_bus *bus)
 
 		if (*dump_mem) {
 			dump_addr = *dump_mem;
-			dev_info(sde_dbg_base.dev,
-				"%s: start_addr:0x%pK len:0x%x\n",
-				__func__, dump_addr, list_size);
+			if (in_log)
+				dev_info(sde_dbg_base.dev,
+					"%s: start_addr:0x%pK len:0x%x\n",
+					__func__, dump_addr, list_size);
 		} else {
 			in_mem = false;
 			pr_err("dump_mem: allocation fails\n");
@@ -3950,7 +3994,7 @@ static void _sde_dbg_dump_vbif_dbg_bus(struct sde_dbg_vbif_debug_bus *bus)
  */
 static void _sde_dump_array(struct sde_dbg_reg_base *blk_arr[],
 	u32 len, bool do_panic, const char *name, bool dump_dbgbus_sde,
-	bool dump_dbgbus_vbif_rt, bool dump_all)
+	bool dump_dbgbus_vbif_rt, bool dump_all, bool dump_secure)
 {
 	int i;
 
@@ -3960,14 +4004,18 @@ static void _sde_dump_array(struct sde_dbg_reg_base *blk_arr[],
 		sde_evtlog_dump_all(sde_dbg_base.evtlog);
 
 	if (dump_all || !blk_arr || !len) {
-		_sde_dump_reg_all();
+		_sde_dump_reg_all(dump_secure);
 	} else {
 		for (i = 0; i < len; i++) {
 			if (blk_arr[i] != NULL)
 				_sde_dump_reg_by_ranges(blk_arr[i],
-					sde_dbg_base.enable_reg_dump);
+					sde_dbg_base.enable_reg_dump,
+					dump_secure);
 		}
 	}
+
+	if (sde_dbg_base.enable_reg_dump & SDE_DBG_DUMP_IN_MEM)
+		pr_info("=========Captured reg dump in memory=========\n");
 
 	if (dump_dbgbus_sde)
 		_sde_dbg_dump_sde_dbg_bus(&sde_dbg_base.dbgbus_sde);
@@ -3975,7 +4023,7 @@ static void _sde_dump_array(struct sde_dbg_reg_base *blk_arr[],
 	if (dump_dbgbus_vbif_rt)
 		_sde_dbg_dump_vbif_dbg_bus(&sde_dbg_base.dbgbus_vbif_rt);
 
-	if (sde_dbg_base.dsi_dbg_bus || dump_all)
+	if (sde_dbg_base.dsi_dbg_bus)
 		dsi_ctrl_debug_dump(sde_dbg_base.dbgbus_dsi.entries,
 				    sde_dbg_base.dbgbus_dsi.size);
 
@@ -4001,7 +4049,8 @@ static void _sde_dump_work(struct work_struct *work)
 		sde_dbg_base.work_panic, "evtlog_workitem",
 		sde_dbg_base.dbgbus_sde.cmn.include_in_deferred_work,
 		sde_dbg_base.dbgbus_vbif_rt.cmn.include_in_deferred_work,
-		sde_dbg_base.dump_all);
+		sde_dbg_base.dump_all,
+		sde_dbg_base.dump_secure);
 }
 
 void sde_dbg_dump(enum sde_dbg_dump_context dump_mode, const char *name, ...)
@@ -4011,6 +4060,7 @@ void sde_dbg_dump(enum sde_dbg_dump_context dump_mode, const char *name, ...)
 	bool dump_dbgbus_sde = false;
 	bool dump_dbgbus_vbif_rt = false;
 	bool dump_all = false;
+	bool dump_secure = false;
 	va_list args;
 	char *blk_name = NULL;
 	struct sde_dbg_reg_base *blk_base = NULL;
@@ -4067,6 +4117,9 @@ void sde_dbg_dump(enum sde_dbg_dump_context dump_mode, const char *name, ...)
 
 		if (!strcmp(blk_name, "panic"))
 			do_panic = true;
+
+		if (!strcmp(blk_name, "secure"))
+			dump_secure = true;
 	}
 	va_end(args);
 
@@ -4081,7 +4134,8 @@ void sde_dbg_dump(enum sde_dbg_dump_context dump_mode, const char *name, ...)
 		schedule_work(&sde_dbg_base.dump_work);
 	} else {
 		_sde_dump_array(blk_arr, blk_len, do_panic, name,
-				dump_dbgbus_sde, dump_dbgbus_vbif_rt, dump_all);
+				dump_dbgbus_sde, dump_dbgbus_vbif_rt, dump_all,
+				dump_secure);
 	}
 }
 
@@ -4116,8 +4170,9 @@ void sde_dbg_ctrl(const char *name, ...)
 		if (!strcmp(blk_name, "panic_underrun") &&
 				sde_dbg_base.debugfs_ctrl &
 				DBG_CTRL_PANIC_UNDERRUN) {
-			pr_debug("panic underrun\n");
-			panic("underrun");
+			pr_err("panic underrun\n");
+			SDE_DBG_DUMP_WQ("all", "dbg_bus", "vbif_dbg_bus",
+					"panic");
 		}
 
 		if (!strcmp(blk_name, "reset_hw_panic") &&
@@ -4189,26 +4244,9 @@ static ssize_t sde_evtlog_dump_read(struct file *file, char __user *buff,
 	return len;
 }
 
-/**
- * sde_evtlog_dump_write - debugfs write handler for evtlog dump
- * @file: file handler
- * @user_buf: user buffer content from debugfs
- * @count: size of user buffer
- * @ppos: position offset of user buffer
- */
-static ssize_t sde_evtlog_dump_write(struct file *file,
-	const char __user *user_buf, size_t count, loff_t *ppos)
-{
-	_sde_dump_array(NULL, 0, sde_dbg_base.panic_on_err, "dump_debugfs",
-		true, true, true);
-
-	return count;
-}
-
 static const struct file_operations sde_evtlog_fops = {
 	.open = sde_dbg_debugfs_open,
 	.read = sde_evtlog_dump_read,
-	.write = sde_evtlog_dump_write,
 };
 
 /**
@@ -5129,7 +5167,9 @@ void sde_dbg_init_dbg_buses(u32 hwversion)
 		dbg->dbgbus_dsi.entries = dsi_dbg_bus_sdm845;
 		dbg->dbgbus_dsi.size = ARRAY_SIZE(dsi_dbg_bus_sdm845);
 	} else if (IS_SM8150_TARGET(hwversion) || IS_SM6150_TARGET(hwversion) ||
-				IS_SDMMAGPIE_TARGET(hwversion)) {
+				IS_SDMMAGPIE_TARGET(hwversion) ||
+				IS_SDMTRINKET_TARGET(hwversion) ||
+				IS_ATOLL_TARGET(hwversion)) {
 		dbg->dbgbus_sde.entries = dbg_bus_sde_sm8150;
 		dbg->dbgbus_sde.cmn.entries_size =
 				ARRAY_SIZE(dbg_bus_sde_sm8150);
@@ -5165,7 +5205,15 @@ int sde_dbg_init(struct device *dev, struct sde_dbg_power_ctrl *power_ctrl)
 
 	INIT_WORK(&sde_dbg_base.dump_work, _sde_dump_work);
 	sde_dbg_base.work_panic = false;
+#if defined(CONFIG_DISPLAY_SAMSUNG) && defined(CONFIG_SEC_DEBUG)
+	if (sec_debug_is_enabled())
+		sde_dbg_base.panic_on_err = DEFAULT_PANIC;
+	else
+		sde_dbg_base.panic_on_err = 0;
+#else
 	sde_dbg_base.panic_on_err = DEFAULT_PANIC;
+#endif
+
 	sde_dbg_base.enable_reg_dump = DEFAULT_REGDUMP;
 	memset(&sde_dbg_base.regbuf, 0, sizeof(sde_dbg_base.regbuf));
 

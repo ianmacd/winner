@@ -43,8 +43,8 @@ static int link_quirk;
 module_param(link_quirk, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(link_quirk, "Don't clear the chain bit on a link TRB");
 
-static unsigned int quirks;
-module_param(quirks, uint, S_IRUGO);
+static unsigned long long quirks;
+module_param(quirks, ullong, S_IRUGO);
 MODULE_PARM_DESC(quirks, "Bit flags for quirks to be enabled as default");
 
 static bool td_on_ring(struct xhci_td *td, struct xhci_ring *ring)
@@ -84,6 +84,29 @@ int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, int usec)
 		result = readl(ptr);
 		if (result == ~(u32)0)		/* card removed */
 			return -ENODEV;
+		result &= mask;
+		if (result == done)
+			return 0;
+		udelay(1);
+		usec--;
+	} while (usec > 0);
+	return -ETIMEDOUT;
+}
+
+int xhci_handshake_check_state(struct xhci_hcd *xhci,
+		void __iomem *ptr, u32 mask, u32 done, int usec)
+{
+	u32	result;
+
+	do {
+		result = readl_relaxed(ptr);
+		if (result == ~(u32)0)	/* card removed */
+			return -ENODEV;
+#if !defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
+		/* host removed. Bail out */
+		if (xhci->xhc_state & XHCI_STATE_REMOVING)
+			return -ENODEV;
+#endif
 		result &= mask;
 		if (result == done)
 			return 0;
@@ -216,7 +239,7 @@ int xhci_reset(struct xhci_hcd *xhci)
 	if (xhci->quirks & XHCI_INTEL_HOST)
 		udelay(1000);
 
-	ret = xhci_handshake(&xhci->op_regs->command,
+	ret = xhci_handshake_check_state(xhci, &xhci->op_regs->command,
 			CMD_RESET, 0, 10 * 1000 * 1000);
 	if (ret)
 		return ret;
@@ -924,6 +947,7 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 	unsigned int		delay = XHCI_MAX_HALT_USEC;
 	struct usb_hcd		*hcd = xhci_to_hcd(xhci);
 	u32			command;
+	u32			res;
 
 	if (!hcd->state)
 		return 0;
@@ -963,6 +987,12 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 	if (xhci_handshake(&xhci->op_regs->status,
 		      STS_HALT, STS_HALT, delay)) {
 		xhci_warn(xhci, "WARN: xHC CMD_RUN timeout\n");
+		/* Set the HW_ACCESSIBLE so that any pending interrupts are
+		 * served.
+		 */
+		set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+		set_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
+		xhci_hc_died(xhci);
 		spin_unlock_irq(&xhci->lock);
 		return -ETIMEDOUT;
 	}
@@ -975,11 +1005,28 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 	command = readl(&xhci->op_regs->command);
 	command |= CMD_CSS;
 	writel(command, &xhci->op_regs->command);
+	xhci->broken_suspend = 0;
 	if (xhci_handshake(&xhci->op_regs->status,
 				STS_SAVE, 0, 10 * 1000)) {
-		xhci_warn(xhci, "WARN: xHC save state timeout\n");
-		spin_unlock_irq(&xhci->lock);
-		return -ETIMEDOUT;
+	/*
+	 * AMD SNPS xHC 3.0 occasionally does not clear the
+	 * SSS bit of USBSTS and when driver tries to poll
+	 * to see if the xHC clears BIT(8) which never happens
+	 * and driver assumes that controller is not responding
+	 * and times out. To workaround this, its good to check
+	 * if SRE and HCE bits are not set (as per xhci
+	 * Section 5.4.2) and bypass the timeout.
+	 */
+		res = readl(&xhci->op_regs->status);
+		if ((xhci->quirks & XHCI_SNPS_BROKEN_SUSPEND) &&
+		    (((res & STS_SRE) == 0) &&
+				((res & STS_HCE) == 0))) {
+			xhci->broken_suspend = 1;
+		} else {
+			xhci_warn(xhci, "WARN: xHC save state timeout\n");
+			spin_unlock_irq(&xhci->lock);
+			return -ETIMEDOUT;
+		}
 	}
 	spin_unlock_irq(&xhci->lock);
 
@@ -1032,7 +1079,7 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 	set_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
 
 	spin_lock_irq(&xhci->lock);
-	if (xhci->quirks & XHCI_RESET_ON_RESUME)
+	if ((xhci->quirks & XHCI_RESET_ON_RESUME) || xhci->broken_suspend)
 		hibernated = true;
 
 	if (!hibernated) {
@@ -4138,11 +4185,6 @@ static int xhci_set_usb2_hardware_lpm(struct usb_hcd *hcd,
 	if (udev->usb2_hw_lpm_capable != 1)
 		return -EPERM;
 
-	/* some USB3.0 memory stick doesn't support L1 mode,
-	  * so we add XHCI_LPM_L1_DISABLE quirks for disabling L1 mode */
-	if (!(xhci->quirks & XHCI_LPM_L1_SUPPORT))
-		return -EPERM;
-
 	spin_lock_irqsave(&xhci->lock, flags);
 
 	port_array = xhci->usb2_ports;
@@ -4374,6 +4416,14 @@ static u16 xhci_calculate_u1_timeout(struct xhci_hcd *xhci,
 {
 	unsigned long long timeout_ns;
 
+	/* Prevent U1 if service interval is shorter than U1 exit latency */
+	if (usb_endpoint_xfer_int(desc) || usb_endpoint_xfer_isoc(desc)) {
+		if (xhci_service_interval_to_ns(desc) <= udev->u1_params.mel) {
+			dev_dbg(&udev->dev, "Disable U1, ESIT shorter than exit latency\n");
+			return USB3_LPM_DISABLED;
+		}
+	}
+
 	if (xhci->quirks & XHCI_INTEL_HOST)
 		timeout_ns = xhci_calculate_intel_u1_timeout(udev, desc);
 	else
@@ -4429,6 +4479,14 @@ static u16 xhci_calculate_u2_timeout(struct xhci_hcd *xhci,
 		struct usb_endpoint_descriptor *desc)
 {
 	unsigned long long timeout_ns;
+
+	/* Prevent U2 if service interval is shorter than U2 exit latency */
+	if (usb_endpoint_xfer_int(desc) || usb_endpoint_xfer_isoc(desc)) {
+		if (xhci_service_interval_to_ns(desc) <= udev->u2_params.mel) {
+			dev_dbg(&udev->dev, "Disable U2, ESIT shorter than exit latency\n");
+			return USB3_LPM_DISABLED;
+		}
+	}
 
 	if (xhci->quirks & XHCI_INTEL_HOST)
 		timeout_ns = xhci_calculate_intel_u2_timeout(udev, desc);
@@ -4967,7 +5025,7 @@ int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks)
 		return retval;
 	xhci_dbg(xhci, "Called HCD init\n");
 
-	xhci_info(xhci, "hcc params 0x%08x hci version 0x%x quirks 0x%08x\n",
+	xhci_info(xhci, "hcc params 0x%08x hci version 0x%x quirks 0x%016llx\n",
 		  xhci->hcc_params, xhci->hci_version, xhci->quirks);
 
 	return 0;
@@ -4981,6 +5039,7 @@ static phys_addr_t xhci_get_sec_event_ring_phys_addr(struct usb_hcd *hcd,
 	struct device *dev = hcd->self.sysdev;
 	struct sg_table sgt;
 	phys_addr_t pa;
+	int result = 0;
 
 	if (intr_num >= xhci->max_interrupters) {
 		xhci_err(xhci, "intr num %d >= max intrs %d\n", intr_num,
@@ -4992,10 +5051,15 @@ static phys_addr_t xhci_get_sec_event_ring_phys_addr(struct usb_hcd *hcd,
 		xhci->sec_event_ring && xhci->sec_event_ring[intr_num]
 		&& xhci->sec_event_ring[intr_num]->first_seg) {
 
-		dma_get_sgtable(dev, &sgt,
+		result = dma_get_sgtable(dev, &sgt,
 			xhci->sec_event_ring[intr_num]->first_seg->trbs,
 			xhci->sec_event_ring[intr_num]->first_seg->dma,
 			TRB_SEGMENT_SIZE);
+
+		if(result < 0) {
+			xhci_err(xhci, "%s: error occured=%d\n", __func__, result);
+			return 0;
+		}
 
 		*dma = xhci->sec_event_ring[intr_num]->first_seg->dma;
 
@@ -5018,6 +5082,7 @@ static phys_addr_t xhci_get_xfer_ring_phys_addr(struct usb_hcd *hcd,
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
 	struct sg_table sgt;
 	phys_addr_t pa;
+	int result = 0;
 
 	ret = xhci_check_args(hcd, udev, ep, 1, true, __func__);
 	if (ret <= 0) {
@@ -5031,11 +5096,16 @@ static phys_addr_t xhci_get_xfer_ring_phys_addr(struct usb_hcd *hcd,
 	if (virt_dev->eps[ep_index].ring &&
 		virt_dev->eps[ep_index].ring->first_seg) {
 
-		dma_get_sgtable(dev, &sgt,
+		result = dma_get_sgtable(dev, &sgt,
 			virt_dev->eps[ep_index].ring->first_seg->trbs,
 			virt_dev->eps[ep_index].ring->first_seg->dma,
 			TRB_SEGMENT_SIZE);
 
+		if(result < 0) {
+			xhci_err(xhci, "%s: error occured=%d\n", __func__, result);
+			return 0;
+		}
+			
 		*dma = virt_dev->eps[ep_index].ring->first_seg->dma;
 
 		pa = page_to_phys(sg_page(sgt.sgl));

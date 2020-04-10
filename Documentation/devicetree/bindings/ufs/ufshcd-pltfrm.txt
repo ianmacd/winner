@@ -26,9 +26,11 @@ Optional properties:
 - vcc-voltage-level     : specifies voltage levels for VCC supply.
                           Should be specified in pairs (min, max), units uV.
 - vcc-low-voltage-sup	: If specified, treats min voltage from vcc-voltage-level as
-                          low voltage level different from max voltage.
+			  low voltage level different from max voltage.
 - vccq-supply           : phandle to VCCQ supply regulator node
 - vccq2-supply          : phandle to VCCQ2 supply regulator node
+- vccq2-voltage-level   : specifies voltage levels for VCCQ2 supply.
+                          Should be specified in pairs (min, max), units uV.
 - vcc-supply-1p8        : For embedded UFS devices, valid VCC range is 1.7-1.95V
                           or 2.7-3.6V. This boolean property when set, specifies
 			  to use low voltage range of 1.7-1.95V. Note for external
@@ -166,7 +168,6 @@ enabled and functional in the driver:
 - qcom,vddp-ref-clk-supply	 : reference clock to ufs device. Controlled by the host driver.
 - qcom,vddp-ref-clk-max-microamp : specifies max. load that can be drawn for
 				   ref-clk supply.
-
 
 Example:
 	ufshc@0xfc598000 {

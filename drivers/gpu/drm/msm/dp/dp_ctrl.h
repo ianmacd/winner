@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,9 +25,10 @@
 struct dp_ctrl {
 	int (*init)(struct dp_ctrl *dp_ctrl, bool flip, bool reset);
 	void (*deinit)(struct dp_ctrl *dp_ctrl);
-	int (*on)(struct dp_ctrl *dp_ctrl, bool mst_mode, bool shallow);
+	int (*on)(struct dp_ctrl *dp_ctrl, bool mst_mode, bool fec_en,
+			bool shallow);
 	void (*off)(struct dp_ctrl *dp_ctrl);
-	void (*abort)(struct dp_ctrl *dp_ctrl);
+	void (*abort)(struct dp_ctrl *dp_ctrl, bool reset);
 	void (*isr)(struct dp_ctrl *dp_ctrl);
 	bool (*handle_sink_request)(struct dp_ctrl *dp_ctrl);
 	void (*process_phy_test_request)(struct dp_ctrl *dp_ctrl);

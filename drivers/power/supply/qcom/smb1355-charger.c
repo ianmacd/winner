@@ -54,6 +54,9 @@
 #define BATT_GT_PRE_TO_FAST_BIT			BIT(4)
 #define ENABLE_CHARGING_BIT			BIT(3)
 
+#define CHGR_CHARGING_ENABLE_CMD_REG		(CHGR_BASE + 0x42)
+#define CHARGING_ENABLE_CMD_BIT			BIT(0)
+
 #define CHGR_CFG2_REG				(CHGR_BASE + 0x51)
 #define CHG_EN_SRC_BIT				BIT(7)
 #define CHG_EN_POLARITY_BIT			BIT(6)
@@ -240,18 +243,28 @@ struct smb1355 {
 	struct smb_params	param;
 
 	struct mutex		write_lock;
+	struct mutex		suspend_lock;
 
 	struct power_supply	*parallel_psy;
 	struct pmic_revid_data	*pmic_rev_id;
-
+	int			d_health;
 	int			c_health;
 	int			c_charger_temp_max;
 	int			die_temp_deciDegC;
+	int			suspended_usb_icl;
+	int			charge_type;
+	int			vbatt_uv;
+	int			fcc_ua;
 	bool			exit_die_temp;
 	struct delayed_work	die_temp_work;
 	bool			disabled;
+	bool			suspended;
+	bool			charging_enabled;
+	bool			pin_status;
 
 	struct votable		*irq_disable_votable;
+	struct votable		*fcc_votable;
+	struct votable		*fv_votable;
 };
 
 enum {
@@ -261,11 +274,32 @@ enum {
 
 static bool is_secure(struct smb1355 *chip, int addr)
 {
-	if (addr == CLOCK_REQUEST_REG)
+	if (addr == CLOCK_REQUEST_REG || addr == I2C_SS_DIG_PMIC_SID_REG)
 		return true;
 
 	/* assume everything above 0xA0 is secure */
 	return (addr & 0xFF) >= 0xA0;
+}
+
+static bool is_voter_available(struct smb1355 *chip)
+{
+	if (!chip->fcc_votable) {
+		chip->fcc_votable = find_votable("FCC");
+		if (!chip->fcc_votable) {
+			pr_debug("Couldn't find FCC votable\n");
+			return false;
+		}
+	}
+
+	if (!chip->fv_votable) {
+		chip->fv_votable = find_votable("FV");
+		if (!chip->fv_votable) {
+			pr_debug("Couldn't find FV votable\n");
+			return false;
+		}
+	}
+
+	return true;
 }
 
 static int smb1355_read(struct smb1355 *chip, u16 addr, u8 *val)
@@ -592,29 +626,157 @@ static int smb1355_get_prop_health(struct smb1355 *chip, int type)
 	return POWER_SUPPLY_HEALTH_COOL;
 }
 
+static int smb1355_get_prop_voltage_max(struct smb1355 *chip,
+					union power_supply_propval *val)
+{
+	int rc = 0;
+
+	mutex_lock(&chip->suspend_lock);
+	if (chip->suspended) {
+		val->intval = chip->vbatt_uv;
+		goto done;
+	}
+	rc = smb1355_get_charge_param(chip, &chip->param.ov, &val->intval);
+	if (rc < 0)
+		pr_err("failed to read vbatt rc=%d\n", rc);
+	else
+		chip->vbatt_uv = val->intval;
+done:
+	mutex_unlock(&chip->suspend_lock);
+	return rc;
+}
+
+static int smb1355_get_prop_constant_charge_current_max(struct smb1355 *chip,
+					union power_supply_propval *val)
+{
+	int rc = 0;
+
+	mutex_lock(&chip->suspend_lock);
+	if (chip->suspended) {
+		val->intval = chip->fcc_ua;
+		goto done;
+	}
+	rc = smb1355_get_charge_param(chip, &chip->param.fcc, &val->intval);
+	if (rc < 0)
+		pr_err("failed to read fcc rc=%d\n", rc);
+	else
+		chip->fcc_ua = val->intval;
+done:
+	mutex_unlock(&chip->suspend_lock);
+	return rc;
+}
+
+static int smb1355_get_prop_health_value(struct smb1355 *chip,
+				union power_supply_propval *val, int type)
+{
+	mutex_lock(&chip->suspend_lock);
+	if (chip->suspended) {
+		val->intval = (type == DIE_TEMP) ? chip->d_health :
+						chip->c_health;
+	} else {
+		val->intval = smb1355_get_prop_health(chip, (type == DIE_TEMP) ?
+						DIE_TEMP : CONNECTOR_TEMP);
+		if (type == DIE_TEMP)
+			chip->d_health = val->intval;
+		else
+			chip->c_health = val->intval;
+	}
+
+	mutex_unlock(&chip->suspend_lock);
+
+	return 0;
+}
+
+static int smb1355_get_prop_online(struct smb1355 *chip,
+					union power_supply_propval *val)
+{
+	int rc = 0;
+	u8 stat;
+
+	mutex_lock(&chip->suspend_lock);
+	if (chip->suspended) {
+		val->intval = chip->charging_enabled;
+		goto done;
+	}
+	rc = smb1355_read(chip, BATTERY_STATUS_3_REG, &stat);
+	if (rc < 0) {
+		pr_err("failed to read BATTERY_STATUS_3_REG %d\n", rc);
+	} else {
+		val->intval = (bool)(stat & ENABLE_CHARGING_BIT);
+		chip->charging_enabled = val->intval;
+	}
+done:
+	mutex_unlock(&chip->suspend_lock);
+	return rc;
+}
+
+static int smb1355_get_prop_pin_enabled(struct smb1355 *chip,
+					union power_supply_propval *val)
+{
+	int rc = 0;
+	u8 stat;
+
+	mutex_lock(&chip->suspend_lock);
+	if (chip->suspended) {
+		val->intval = chip->pin_status;
+		goto done;
+	}
+	rc = smb1355_read(chip, BATTERY_STATUS_2_REG, &stat);
+	if (rc < 0) {
+		pr_err("failed to read BATTERY_STATUS_2_REG %d\n", rc);
+	} else {
+		val->intval = !(stat & DISABLE_CHARGING_BIT);
+		chip->pin_status = val->intval;
+	}
+done:
+	mutex_unlock(&chip->suspend_lock);
+	return rc;
+}
+
+static int smb1355_get_prop_charge_type(struct smb1355 *chip,
+					union power_supply_propval *val)
+{
+	int rc = 0;
+
+	/*
+	 * In case of system suspend we should not allow
+	 * register reads and writes to the device as it
+	 * leads to i2c transaction failures.
+	 */
+	mutex_lock(&chip->suspend_lock);
+	if (chip->suspended) {
+		val->intval = chip->charge_type;
+		goto done;
+	}
+	rc = smb1355_get_prop_batt_charge_type(chip, val);
+	if (rc < 0)
+		pr_err("failed to read batt_charge_type %d\n", rc);
+	else
+		chip->charge_type = val->intval;
+done:
+	mutex_unlock(&chip->suspend_lock);
+	return rc;
+}
+
 #define MIN_PARALLEL_ICL_UA		250000
+#define SUSPEND_CURRENT_UA		2000
 static int smb1355_parallel_get_prop(struct power_supply *psy,
 				     enum power_supply_property prop,
 				     union power_supply_propval *val)
 {
 	struct smb1355 *chip = power_supply_get_drvdata(psy);
-	u8 stat;
 	int rc = 0;
 
 	switch (prop) {
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
-		rc = smb1355_get_prop_batt_charge_type(chip, val);
+		rc = smb1355_get_prop_charge_type(chip, val);
 		break;
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 	case POWER_SUPPLY_PROP_ONLINE:
-		rc = smb1355_read(chip, BATTERY_STATUS_3_REG, &stat);
-		if (rc >= 0)
-			val->intval = (bool)(stat & ENABLE_CHARGING_BIT);
+		rc = smb1355_get_prop_online(chip, val);
 		break;
 	case POWER_SUPPLY_PROP_PIN_ENABLED:
-		rc = smb1355_read(chip, BATTERY_STATUS_2_REG, &stat);
-		if (rc >= 0)
-			val->intval = !(stat & DISABLE_CHARGING_BIT);
+		rc = smb1355_get_prop_pin_enabled(chip, val);
 		break;
 	case POWER_SUPPLY_PROP_CHARGER_TEMP:
 		val->intval = chip->die_temp_deciDegC;
@@ -636,12 +798,10 @@ static int smb1355_parallel_get_prop(struct power_supply *psy,
 		val->intval = chip->disabled;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
-		rc = smb1355_get_charge_param(chip, &chip->param.ov,
-						&val->intval);
+		rc = smb1355_get_prop_voltage_max(chip, val);
 		break;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
-		rc = smb1355_get_charge_param(chip, &chip->param.fcc,
-						&val->intval);
+		rc = smb1355_get_prop_constant_charge_current_max(chip, val);
 		break;
 	case POWER_SUPPLY_PROP_MODEL_NAME:
 		val->strval = chip->name;
@@ -651,13 +811,13 @@ static int smb1355_parallel_get_prop(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CONNECTOR_HEALTH:
 		if (chip->c_health == -EINVAL)
-			val->intval = smb1355_get_prop_health(chip,
-						CONNECTOR_TEMP);
+			rc = smb1355_get_prop_health_value(chip, val,
+							CONNECTOR_TEMP);
 		else
 			val->intval = chip->c_health;
 		break;
 	case POWER_SUPPLY_PROP_DIE_HEALTH:
-		val->intval = smb1355_get_prop_health(chip, DIE_TEMP);
+		rc = smb1355_get_prop_health_value(chip, val, DIE_TEMP);
 		break;
 	case POWER_SUPPLY_PROP_PARALLEL_BATFET_MODE:
 		val->intval = chip->dt.pl_batfet_mode;
@@ -669,11 +829,16 @@ static int smb1355_parallel_get_prop(struct power_supply *psy,
 			val->intval = 0;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		if (IS_USBIN(chip->dt.pl_mode))
-			rc = smb1355_get_charge_param(chip,
+		if (IS_USBIN(chip->dt.pl_mode)) {
+			/* Report cached ICL until its configured correctly */
+			if (chip->suspended_usb_icl)
+				val->intval = chip->suspended_usb_icl;
+			else
+				rc = smb1355_get_charge_param(chip,
 					&chip->param.usb_icl, &val->intval);
-		else
+		} else {
 			val->intval = 0;
+		}
 		break;
 	case POWER_SUPPLY_PROP_MIN_ICL:
 		val->intval = MIN_PARALLEL_ICL_UA;
@@ -705,6 +870,18 @@ static int smb1355_set_parallel_charging(struct smb1355 *chip, bool disable)
 
 	if (chip->disabled == disable)
 		return 0;
+
+	if (IS_USBIN(chip->dt.pl_mode)) {
+		/*
+		 * Initialize ICL configuration to minimum value while
+		 * depending upon the set icl configuration method to properly
+		 * configure the ICL value. At the same time, cache the value
+		 * of ICL to be reported as 2mA.
+		 */
+		chip->suspended_usb_icl = SUSPEND_CURRENT_UA;
+		smb1355_set_charge_param(chip,
+				&chip->param.usb_icl, MIN_PARALLEL_ICL_UA);
+	}
 
 	rc = smb1355_masked_write(chip, WD_CFG_REG, WDOG_TIMER_EN_BIT,
 				 disable ? 0 : WDOG_TIMER_EN_BIT);
@@ -774,6 +951,7 @@ static int smb1355_set_current_max(struct smb1355 *chip, int curr)
 
 		rc = smb1355_set_charge_param(chip,
 				&chip->param.usb_icl, curr);
+		chip->suspended_usb_icl = 0;
 	}
 
 	return rc;
@@ -800,6 +978,11 @@ static int smb1355_parallel_set_prop(struct power_supply *psy,
 	struct smb1355 *chip = power_supply_get_drvdata(psy);
 	int rc = 0;
 
+	mutex_lock(&chip->suspend_lock);
+	if (chip->suspended) {
+		pr_debug("parallel power supply set prop %d\n", prop);
+		goto done;
+	}
 	switch (prop) {
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
 		rc = smb1355_set_parallel_charging(chip, (bool)val->intval);
@@ -829,9 +1012,10 @@ static int smb1355_parallel_set_prop(struct power_supply *psy,
 	default:
 		pr_debug("parallel power supply set prop %d not supported\n",
 			prop);
-		return -EINVAL;
+		rc = -EINVAL;
 	}
-
+done:
+	mutex_unlock(&chip->suspend_lock);
 	return rc;
 }
 
@@ -1039,7 +1223,17 @@ static int smb1355_init_hw(struct smb1355 *chip)
 		return rc;
 	}
 
-	/* disable parallel charging path */
+	/*
+	 * Disable command based SMB1355 enablement and disable parallel
+	 * charging path by switching to command based mode.
+	 */
+	rc = smb1355_masked_write(chip, CHGR_CHARGING_ENABLE_CMD_REG,
+				CHARGING_ENABLE_CMD_BIT, 0);
+	if (rc < 0) {
+		pr_err("Coudln't configure command bit, rc=%d\n", rc);
+		return rc;
+	}
+
 	rc = smb1355_set_parallel_charging(chip, true);
 	if (rc < 0) {
 		pr_err("Couldn't disable parallel path rc=%d\n", rc);
@@ -1361,8 +1555,10 @@ static int smb1355_probe(struct platform_device *pdev)
 	chip->dev = &pdev->dev;
 	chip->param = v1_params;
 	chip->c_health = -EINVAL;
+	chip->d_health = -EINVAL;
 	chip->c_charger_temp_max = -EINVAL;
 	mutex_init(&chip->write_lock);
+	mutex_init(&chip->suspend_lock);
 	INIT_DELAYED_WORK(&chip->die_temp_work, die_temp_work);
 	chip->disabled = false;
 	chip->die_temp_deciDegC = -EINVAL;
@@ -1458,10 +1654,50 @@ static void smb1355_shutdown(struct platform_device *pdev)
 	smb1355_clk_request(chip, false);
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int smb1355_suspend(struct device *dev)
+{
+	struct smb1355 *chip = dev_get_drvdata(dev);
+
+	cancel_delayed_work_sync(&chip->die_temp_work);
+
+	mutex_lock(&chip->suspend_lock);
+	chip->suspended = true;
+	mutex_unlock(&chip->suspend_lock);
+
+	return 0;
+}
+
+static int smb1355_resume(struct device *dev)
+{
+	struct smb1355 *chip = dev_get_drvdata(dev);
+
+	mutex_lock(&chip->suspend_lock);
+	chip->suspended = false;
+	mutex_unlock(&chip->suspend_lock);
+
+	/*
+	 * During suspend i2c failures are fixed by reporting cached
+	 * chip state, to report correct values we need to invoke
+	 * callbacks for the fcc and fv votables. To avoid excessive
+	 * invokes to callbacks invoke only when smb1355 is enabled.
+	 */
+	if (is_voter_available(chip) && chip->charging_enabled) {
+		rerun_election(chip->fcc_votable);
+		rerun_election(chip->fv_votable);
+	}
+
+	return 0;
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(smb1355_pm_ops, smb1355_suspend, smb1355_resume);
+
 static struct platform_driver smb1355_driver = {
 	.driver	= {
 		.name		= "qcom,smb1355-charger",
 		.owner		= THIS_MODULE,
+		.pm		= &smb1355_pm_ops,
 		.of_match_table	= match_table,
 	},
 	.probe		= smb1355_probe,

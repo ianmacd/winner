@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -131,7 +131,6 @@ static void dsi_phy_hw_v4_0_lane_settings(struct dsi_phy_hw *phy,
 		 * to the logical data lane 0
 		 */
 		DSI_W32(phy, DSIPHY_LNX_LPRX_CTRL(i), 0);
-		DSI_W32(phy, DSIPHY_LNX_PIN_SWAP(i), 0x0);
 	}
 	dsi_phy_hw_v4_0_config_lpcdrx(phy, cfg, true);
 
@@ -141,14 +140,10 @@ static void dsi_phy_hw_v4_0_lane_settings(struct dsi_phy_hw *phy,
 		DSI_W32(phy, DSIPHY_LNX_CFG1(i), cfg->lanecfg.lane[i][1]);
 		DSI_W32(phy, DSIPHY_LNX_CFG2(i), cfg->lanecfg.lane[i][2]);
 		DSI_W32(phy, DSIPHY_LNX_TX_DCTRL(i), tx_dctrl[i]);
+		DSI_W32(phy, DSIPHY_LNX_PIN_SWAP(i),
+					(cfg->lane_pnswap >> i) & 0x1);
 	}
 
-	if (cfg->force_clk_lane_hs) {
-		u32 reg = DSI_R32(phy, DSIPHY_CMN_LANE_CTRL1);
-
-		reg |= BIT(5) | BIT(6);
-		DSI_W32(phy, DSIPHY_CMN_LANE_CTRL1, reg);
-	}
 }
 
 /**
@@ -204,14 +199,14 @@ void dsi_phy_hw_v4_0_enable(struct dsi_phy_hw *phy,
 
 	/* Enable LDO */
 	DSI_W32(phy, DSIPHY_CMN_VREG_CTRL_0, vreg_ctrl_0);
-	DSI_W32(phy, DSIPHY_CMN_VREG_CTRL_1, 0x19);
+	DSI_W32(phy, DSIPHY_CMN_VREG_CTRL_1, 0x5c);
 	DSI_W32(phy, DSIPHY_CMN_CTRL_3, 0x00);
 	DSI_W32(phy, DSIPHY_CMN_GLBL_STR_SWI_CAL_SEL_CTRL,
 					glbl_str_swi_cal_sel_ctrl);
 	DSI_W32(phy, DSIPHY_CMN_GLBL_HSTX_STR_CTRL_0, glbl_hstx_str_ctrl_0);
 	DSI_W32(phy, DSIPHY_CMN_GLBL_PEMPH_CTRL_0, 0x00);
-	DSI_W32(phy, DSIPHY_CMN_GLBL_RESCODE_OFFSET_TOP_CTRL, 0x00);
-	DSI_W32(phy, DSIPHY_CMN_GLBL_RESCODE_OFFSET_BOT_CTRL, 0x00);
+	DSI_W32(phy, DSIPHY_CMN_GLBL_RESCODE_OFFSET_TOP_CTRL, 0x03);
+	DSI_W32(phy, DSIPHY_CMN_GLBL_RESCODE_OFFSET_BOT_CTRL, 0x3c);
 	DSI_W32(phy, DSIPHY_CMN_GLBL_LPTX_STR_CTRL, 0x55);
 
 	/* Remove power down from all blocks */
@@ -256,16 +251,6 @@ void dsi_phy_hw_v4_0_enable(struct dsi_phy_hw *phy,
 
 	pr_debug("[DSI_%d]Phy enabled ", phy->index);
 }
-
-#if defined(CONFIG_DISPLAY_SAMSUNG)
-void update_phy_temp_code(struct dsi_phy_hw *phy)
-{
-	if (phy->index ==0)
-		DSI_W32(phy, DSIPHY_CMN_CLK_CFG1, 0x31); /* set PLL src */
-	else
-		DSI_W32(phy, DSIPHY_CMN_CLK_CFG1, 0x34); /* set PLL src */
-}
-#endif
 
 /**
  * disable() - Disable PHY hardware
@@ -481,4 +466,19 @@ int dsi_phy_hw_timing_val_v4_0(struct dsi_phy_per_lane_cfgs *timing_cfg,
 		pr_err("%s : [%d] %x \n", __func__, i, timing_val[i]);
 	}
 	return 0;
+}
+
+void dsi_phy_hw_v4_0_set_continuous_clk(struct dsi_phy_hw *phy, bool enable)
+{
+	u32 reg = 0;
+
+	reg = DSI_R32(phy, DSIPHY_CMN_LANE_CTRL1);
+
+	if (enable)
+		reg |= BIT(5) | BIT(6);
+	else
+		reg &= ~(BIT(5) | BIT(6));
+
+	DSI_W32(phy, DSIPHY_CMN_LANE_CTRL1, reg);
+	wmb(); /* make sure request is set */
 }

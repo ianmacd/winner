@@ -19,7 +19,6 @@
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/sched/clock.h>
-#include <linux/kmsg_dump.h>
 
 /* For compatibility */
 #include <linux/fslog.h>
@@ -38,20 +37,16 @@
 
 #ifdef CONFIG_PROC_FSLOG_LOWMEM
 #define FSLOG_BUFLEN_STLOG		(32 * 1024)
-#define FSLOG_BUFLEN_SELOG		(8 * 1024)
-#define FSLOG_BUFLEN_DLOG_EFS		(8 * 1024)
+#define FSLOG_BUFLEN_DLOG_EFS		(16 * 1024)
 #define FSLOG_BUFLEN_DLOG_RMDIR		(16 * 1024)
 #define FSLOG_BUFLEN_DLOG_ETC		(64 * 1024)
 #define FSLOG_BUFLEN_DLOG_MM		(128 * 1024)
-#define FSLOG_BUFLEN_DLOG_SECURITY	(8 * 1024)
 #else /* device has DRAM of high capacity */
 #define FSLOG_BUFLEN_STLOG		(32 * 1024)
-#define FSLOG_BUFLEN_SELOG		(8 * 1024)
-#define FSLOG_BUFLEN_DLOG_EFS		(8 * 1024)
+#define FSLOG_BUFLEN_DLOG_EFS		(16 * 1024)
 #define FSLOG_BUFLEN_DLOG_RMDIR		(16 * 1024)
 #define FSLOG_BUFLEN_DLOG_ETC		(192 * 1024)
 #define FSLOG_BUFLEN_DLOG_MM		(256 * 1024)
-#define FSLOG_BUFLEN_DLOG_SECURITY	(8 * 1024)
 #endif
 
 #define FSLOG_FILE_MODE_VERSION		(S_IRUSR | S_IRGRP | S_IROTH)
@@ -175,16 +170,12 @@ DEFINE_FSLOG_VARIABLE(dlog_efs, FSLOG_BUFLEN_DLOG_EFS);
 DEFINE_FSLOG_VARIABLE(dlog_etc, FSLOG_BUFLEN_DLOG_ETC);
 DEFINE_FSLOG_VARIABLE(dlog_rmdir, FSLOG_BUFLEN_DLOG_RMDIR);
 DEFINE_FSLOG_VARIABLE(stlog, FSLOG_BUFLEN_STLOG);
-DEFINE_FSLOG_VARIABLE(selog, FSLOG_BUFLEN_SELOG);
-DEFINE_FSLOG_VARIABLE(dlog_security, FSLOG_BUFLEN_DLOG_SECURITY);
 
 DEFINE_FSLOG_OPERATION(dlog_mm);
 DEFINE_FSLOG_OPERATION(dlog_efs);
 DEFINE_FSLOG_OPERATION(dlog_etc);
 DEFINE_FSLOG_OPERATION(dlog_rmdir);
 DEFINE_FSLOG_OPERATION(stlog);
-DEFINE_FSLOG_OPERATION(selog);
-DEFINE_FSLOG_OPERATION(dlog_security);
 
 static const char FSLOG_VERSION_STR[] = "1.1.0\n";
 
@@ -218,8 +209,6 @@ DEFINE_FSLOG_CREATE(dlog_efs, dlog_efs, FSLOG_FILE_MODE_DLOG);
 DEFINE_FSLOG_CREATE(dlog_etc, dlog_etc, FSLOG_FILE_MODE_DLOG);
 DEFINE_FSLOG_CREATE(dlog_rmdir, dlog_rmdir, FSLOG_FILE_MODE_DLOG);
 DEFINE_FSLOG_CREATE(stlog, stlog, FSLOG_FILE_MODE_STLOG);
-DEFINE_FSLOG_CREATE(selog, selog, FSLOG_FILE_MODE_STLOG);
-DEFINE_FSLOG_CREATE(dlog_security, dlog_security, FSLOG_FILE_MODE_DLOG);
 
 static int __init fslog_init(void)
 {
@@ -232,8 +221,6 @@ static int __init fslog_init(void)
 	fslog_create_dlog_etc(fslog_dir);
 	fslog_create_dlog_rmdir(fslog_dir);
 	fslog_create_stlog(fslog_dir);
-	fslog_create_selog(fslog_dir);
-	fslog_create_dlog_security(fslog_dir);
 
 	/* To ensure sub-compatibility in versions below O OS */
 	proc_symlink("stlog", NULL, "/proc/fslog/stlog");
@@ -644,43 +631,3 @@ DEFINE_FSLOG_FUNC(dlog_efs);
 DEFINE_FSLOG_FUNC(dlog_etc);
 DEFINE_FSLOG_FUNC(dlog_rmdir);
 DEFINE_FSLOG_FUNC(stlog);
-DEFINE_FSLOG_FUNC(selog);
-DEFINE_FSLOG_FUNC(dlog_security);
-
-#define BUFSIZE 201
-/* print latest filtered kernel log with lines */
-int fslog_kmsg_selog(const char *filter, int lines) {
-	int r = 0, line = 0, remain = 0, cut = 0;
-	int skip = 0, cur = 0, prev = 0;
-	struct kmsg_dumper dumper = { .active = 1 };
-	char buf[BUFSIZE] = {0, };
-	char *ptr;
-	size_t len;
-
-	kmsg_dump_rewind_nolock(&dumper);
-	while (kmsg_dump_get_line_nolock(&dumper, 0, buf, sizeof(buf), &len)) {
-		if (strstr(buf, filter)) {
-			prev = cur;
-			cur = line;
-		}
-		line++;
-	}
-	skip = prev==0 ? prev : prev+1;
-
-	kmsg_dump_rewind_nolock(&dumper);
-	while (kmsg_dump_get_line_nolock(&dumper, 0, buf, sizeof(buf), &len)) {
-		if (skip-- > 0) 
-			continue;
-		ptr = strstr(buf, filter);
-		if (ptr) {
-			remain = lines;
-			cut = ((char *)ptr) - ((char *)buf);
-		}
-		if (remain-- > 0 && strchr(buf, '+'))
-			r = fslog(&fslog_data_selog, "%s", buf + cut);
-		memset(buf, 0, BUFSIZE);
-	}
-
-	return r;
-}
-

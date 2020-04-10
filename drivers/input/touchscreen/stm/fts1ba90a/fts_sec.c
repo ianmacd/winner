@@ -87,6 +87,7 @@ static void get_wet_mode(void *device_data);
 static void get_x_num(void *device_data);
 static void get_y_num(void *device_data);
 static void get_checksum_data(void *device_data);
+static void check_fw_corruption(void *device_data);
 static void run_reference_read(void *device_data);
 static void get_reference(void *device_data);
 static void run_rawcap_read(void *device_data);
@@ -139,6 +140,9 @@ static void aot_enable(void *device_data);
 static void aod_enable(void *device_data);
 static void set_aod_rect(void *device_data);
 static void get_aod_rect(void *device_data);
+static void fod_enable(void *device_data);
+static void set_fod_rect(void *device_data);
+static void singletap_enable(void *device_data);
 static void external_noise_mode(void *device_data);
 static void brush_enable(void *device_data);
 static void set_touchable_area(void *device_data);
@@ -171,6 +175,7 @@ struct sec_cmd ft_commands[] = {
 	{SEC_CMD("get_x_num", get_x_num),},
 	{SEC_CMD("get_y_num", get_y_num),},
 	{SEC_CMD("get_checksum_data", get_checksum_data),},
+	{SEC_CMD("get_crc_check", check_fw_corruption),},
 	{SEC_CMD("run_reference_read", run_reference_read),},
 	{SEC_CMD("get_reference", get_reference),},
 	{SEC_CMD("run_rawcap_read", run_rawcap_read),},
@@ -223,6 +228,9 @@ struct sec_cmd ft_commands[] = {
 	{SEC_CMD_H("aod_enable", aod_enable),},
 	{SEC_CMD("set_aod_rect", set_aod_rect),},
 	{SEC_CMD("get_aod_rect", get_aod_rect),},
+	{SEC_CMD("fod_enable", fod_enable),},
+	{SEC_CMD("set_fod_rect", set_fod_rect),},
+	{SEC_CMD_H("singletap_enable", singletap_enable),},
 	{SEC_CMD_H("external_noise_mode", external_noise_mode),},
 	{SEC_CMD_H("brush_enable", brush_enable),},
 	{SEC_CMD_H("set_touchable_area", set_touchable_area),},
@@ -528,35 +536,40 @@ static ssize_t sensitivity_mode_store(struct device *dev,
 	return count;
 }
 
+#define FTS_SENSITIVITY_POINT_NUM	9
 static ssize_t sensitivity_mode_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct sec_cmd_data *sec = dev_get_drvdata(dev);
 	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
-	u8 rbuf[10] = { 0 };
+	u8 rbuf[FTS_SENSITIVITY_POINT_NUM * 2] = { 0 };
 	u8 reg_read = FTS_READ_SENSITIVITY_VALUE;
 	int ret, i;
-	s16 value[5];
+	s16 value[FTS_SENSITIVITY_POINT_NUM];
+	char temp[10] = { 0 };
 
 	if (info->fts_power_state == FTS_POWER_STATE_POWERDOWN) {
 		input_err(true, &info->client->dev, "%s: [ERROR] Touch is stopped\n", __func__);
 		return -EPERM;
 	}
 
-	ret = info->fts_read_reg(info, &reg_read, 1, rbuf, 10);
+	ret = info->fts_read_reg(info, &reg_read, 1, rbuf, FTS_SENSITIVITY_POINT_NUM * 2);
 	if (ret < 0) {
 		input_err(true, &info->client->dev, "%s: read failed ret = %d\n", __func__, ret);
 		return ret;
 	}
 
-	for (i = 0; i < 5; i++)
-		value[i] = rbuf[i * 2] + (rbuf[i * 2 + 1] << 8);
+	for (i = 0; i < FTS_SENSITIVITY_POINT_NUM; i++) {
+		value[i] = rbuf[i * 2] | (rbuf[i * 2 + 1] << 8);
+		if (i != 0)
+			strlcat(buf, ",", SEC_CMD_BUF_SIZE);
+		snprintf(temp, 10, "%d", value[i]);
+		strlcat(buf, temp, SEC_CMD_BUF_SIZE);
+	}
 
-	input_info(true, &info->client->dev, "%s: %d,%d,%d,%d,%d\n", __func__,
-			value[0], value[1], value[2], value[3], value[4]);
+	input_info(true, &info->client->dev, "%s: %s\n", __func__, buf);
 
-	return snprintf(buf, SEC_CMD_BUF_SIZE, "%d,%d,%d,%d,%d",
-			value[0], value[1], value[2], value[3], value[4]);
+	return strlen(buf);
 }
 
 /*
@@ -574,24 +587,25 @@ static ssize_t read_support_feature(struct device *dev,
 	if (info->board->enable_settings_aot)
 		feature |= INPUT_FEATURE_ENABLE_SETTINGS_AOT;
 
+	if (info->board->sync_reportrate_120)
+		feature |= INPUT_FEATURE_ENABLE_SYNC_RR120;
+
 	snprintf(buff, sizeof(buff), "%d", feature);
 	input_info(true, &info->client->dev, "%s: %s\n", __func__, buff);
 
 	return snprintf(buf, SEC_CMD_BUF_SIZE, "%s", buff);
 }
 
-#ifdef FTS_SUPPORT_SPONGELIB
 static ssize_t get_lp_dump(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct sec_cmd_data *sec = dev_get_drvdata(dev);
 	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
-	u16 addr = FTS_CMD_SPONGE_LP_DUMP;
-	u8 sponge_data[8] = { 0, };
+	u8 string_data[10] = {0, };
 	u16 current_index;
-	int i, ret = 0;
-
-	if (!info->use_sponge)
-		return -ENODEV;
+	u8 dump_format, dump_num;
+	u16 dump_start, dump_end;
+	int i, ret;
+	u16 addr;
 
 	if (info->fts_power_state == FTS_POWER_STATE_POWERDOWN) {
 		input_err(true, &info->client->dev, "%s: [ERROR] Touch is stopped\n",
@@ -601,53 +615,75 @@ static ssize_t get_lp_dump(struct device *dev, struct device_attribute *attr, ch
 
 	fts_interrupt_set(info, INT_DISABLE);
 
-	ret = info->fts_read_from_sponge(info, addr, sponge_data, 2);
+	addr = FTS_CMD_SPONGE_LP_DUMP;
+
+	ret = info->fts_read_from_sponge(info, addr, string_data, 4);
 	if (ret < 0) {
-		input_err(true, &info->client->dev, "%s: Failed to read from Sponge\n", __func__);
-		snprintf(buf, SEC_CMD_BUF_SIZE, "NG, Failed to read from Sponge");
+		input_err(true, &info->client->dev,
+				"%s: Failed to read from Sponge, addr=0x%X\n", __func__, addr);
+		snprintf(buf, SEC_CMD_BUF_SIZE,
+				"NG, Failed to read from Sponge, addr=0x%X", addr);
 		goto out;
 	}
 
-	current_index = (sponge_data[1] & 0xFF) << 8 | (sponge_data[0] & 0xFF);
-	if (current_index > 1000 || current_index < 500) {
+	dump_format = string_data[0];
+	dump_num = string_data[1];
+	dump_start = FTS_CMD_SPONGE_LP_DUMP + 4;
+	dump_end = dump_start + (dump_format * (dump_num - 1));
+
+	current_index = (string_data[3] & 0xFF) << 8 | (string_data[2] & 0xFF);
+	if (current_index > dump_end || current_index < dump_start) {
 		input_err(true, &info->client->dev,
-				"Failed to read Sponge LP log %d\n", current_index);
+				"Failed to Sponge LP log %d\n", current_index);
 		snprintf(buf, SEC_CMD_BUF_SIZE,
-				"NG, Failed to read Sponge LP log, current_index=%d",
+				"NG, Failed to Sponge LP log, current_index=%d",
 				current_index);
 		goto out;
 	}
 
-	input_info(true, &info->client->dev,
-			"%s: DEBUG current_index = %d\n", __func__, current_index);
+	input_info(true, &info->client->dev, "%s: DEBUG format=%d, num=%d, start=%d, end=%d, current_index=%d\n",
+				__func__, dump_format, dump_num, dump_start, dump_end, current_index);
 
-	/* sponge has 62 stacks for LP dump */
-	for (i = 61; i >= 0; i--) {
-		u16 data0, data1, data2, data3;
-		char buff[30] = { 0, };
+	for (i = dump_num - 1; i >= 0; i--) {
+		u16 data0, data1, data2, data3, data4;
+		char buff[30] = {0, };
+		u16 string_addr;
 
-		addr = current_index - (8 * i);
-		if (addr < 500)
-			addr += FTS_CMD_SPONGE_LP_DUMP;
+		if (current_index < (dump_format * i))
+			string_addr = (dump_format * dump_num) + current_index - (dump_format * i);
+		else
+			string_addr = current_index - (dump_format * i);
 
-		ret = info->fts_read_from_sponge(info, addr, sponge_data, 8);
+		if (string_addr < dump_start)
+			string_addr += (dump_format * dump_num);
+
+		addr = string_addr;
+
+		ret = info->fts_read_from_sponge(info, addr, string_data, dump_format);
 		if (ret < 0) {
 			input_err(true, &info->client->dev,
-					"%s: Failed to read from Sponge\n", __func__);
+					"%s: Failed to read from Sponge, addr=0x%X\n", __func__, addr);
 			snprintf(buf, SEC_CMD_BUF_SIZE,
-					"NG, Failed to read from Sponge, addr=%d",
-					addr);
+					"NG, Failed to read from Sponge, addr=0x%X", addr);
 			goto out;
 		}
 
-		data0 = (sponge_data[1] & 0xFF) << 8 | (sponge_data[0] & 0xFF);
-		data1 = (sponge_data[3] & 0xFF) << 8 | (sponge_data[2] & 0xFF);
-		data2 = (sponge_data[5] & 0xFF) << 8 | (sponge_data[4] & 0xFF);
-		data3 = (sponge_data[7] & 0xFF) << 8 | (sponge_data[6] & 0xFF);
-		if (data0 || data1 || data2 || data3) {
-			snprintf(buff, sizeof(buff),
-					"%d: %04x%04x%04x%04x\n",
-					addr, data0, data1, data2, data3);
+		data0 = (string_data[1] & 0xFF) << 8 | (string_data[0] & 0xFF);
+		data1 = (string_data[3] & 0xFF) << 8 | (string_data[2] & 0xFF);
+		data2 = (string_data[5] & 0xFF) << 8 | (string_data[4] & 0xFF);
+		data3 = (string_data[7] & 0xFF) << 8 | (string_data[6] & 0xFF);
+		data4 = (string_data[9] & 0xFF) << 8 | (string_data[8] & 0xFF);
+
+		if (data0 || data1 || data2 || data3 || data4) {
+			if (dump_format == 10) {
+				snprintf(buff, sizeof(buff),
+						"%d: %04x%04x%04x%04x%04x\n",
+						string_addr, data0, data1, data2, data3, data4);
+			} else {
+				snprintf(buff, sizeof(buff),
+						"%d: %04x%04x%04x%04x\n",
+						string_addr, data0, data1, data2, data3);
+			}
 			strlcat(buf, buff, PAGE_SIZE);
 		}
 	}
@@ -657,7 +693,6 @@ out:
 
 	return strlen(buf);
 }
-#endif
 
 static ssize_t prox_power_off_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -690,6 +725,59 @@ static ssize_t prox_power_off_store(struct device *dev,
 	return count;
 }
 
+static ssize_t fts_fod_info_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct sec_cmd_data *sec = dev_get_drvdata(dev);
+	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
+
+	if (!info->board->support_fod) {
+		input_err(true, &info->client->dev, "%s: fod is not supported\n", __func__);
+		return snprintf(buf, SEC_CMD_BUF_SIZE, "NG");
+	}
+
+	input_info(true, &info->client->dev, "%s: x:%d/%d y:%d/%d size:%d\n",
+			__func__, info->fod_x, info->SenseChannelLength,
+			info->fod_y, info->ForceChannelLength, info->fod_vi_size);
+
+	return snprintf(buf, SEC_CMD_BUF_SIZE, "%d,%d,%d,%d,%d\n",
+				info->fod_x, info->fod_y, info->fod_vi_size,
+				info->SenseChannelLength, info->ForceChannelLength);
+}
+
+static ssize_t fts_fod_position_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct sec_cmd_data *sec = dev_get_drvdata(dev);
+	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
+	char buff[3] = { 0 };
+	int ret, i;
+	u8 data[255] = { 0 };
+
+	if (!info->board->support_fod) {
+		input_err(true, &info->client->dev, "%s: fod is not supported\n", __func__);
+		return snprintf(buf, SEC_CMD_BUF_SIZE, "NG");
+	}
+
+	if (!info->fod_vi_size) {
+		input_err(true, &info->client->dev, "%s: fod vi size is 0\n", __func__);
+		return snprintf(buf, SEC_CMD_BUF_SIZE, "NG");
+	}
+
+	ret = info->fts_read_from_sponge(info, FTS_CMD_SPONGE_FOD_POSITION, data, info->fod_vi_size);
+	if (ret <= 0) {
+		input_err(true, &info->client->dev, "%s: Failed to read\n", __func__);
+		return snprintf(buf, SEC_CMD_BUF_SIZE, "NG");
+	}
+
+	for (i = 0; i < info->fod_vi_size; i++) {
+		snprintf(buff, 3, "%02X", data[i]);
+		strlcat(buf, buff, SEC_CMD_BUF_SIZE);
+	}
+
+	return strlen(buf);
+}
+
 static DEVICE_ATTR(ito_check, 0444, read_ito_check_show, NULL);
 static DEVICE_ATTR(raw_check, 0444, read_raw_check_show, NULL);
 static DEVICE_ATTR(multi_count, 0644, read_multi_count_show, clear_multi_count_store);
@@ -704,10 +792,10 @@ static DEVICE_ATTR(read_ambient_info, 0444, read_ambient_info_show, NULL);
 static DEVICE_ATTR(sensitivity_mode, 0664, sensitivity_mode_show, sensitivity_mode_store);
 static DEVICE_ATTR(scrub_pos, 0444, fts_scrub_position, NULL);
 static DEVICE_ATTR(support_feature, 0444, read_support_feature, NULL);
-#ifdef FTS_SUPPORT_SPONGELIB
 static DEVICE_ATTR(get_lp_dump, 0444, get_lp_dump, NULL);
-#endif
 static DEVICE_ATTR(prox_power_off, 0664, prox_power_off_show, prox_power_off_store);
+static DEVICE_ATTR(fod_info, 0444, fts_fod_info_show, NULL);
+static DEVICE_ATTR(fod_pos, 0444, fts_fod_position_show, NULL);
 
 static struct attribute *sec_touch_facotry_attributes[] = {
 	&dev_attr_scrub_pos.attr,
@@ -724,10 +812,10 @@ static struct attribute *sec_touch_facotry_attributes[] = {
 	&dev_attr_read_ambient_info.attr,
 	&dev_attr_sensitivity_mode.attr,
 	&dev_attr_support_feature.attr,
-#ifdef FTS_SUPPORT_SPONGELIB
 	&dev_attr_get_lp_dump.attr,
-#endif
 	&dev_attr_prox_power_off.attr,
+	&dev_attr_fod_info.attr,
+	&dev_attr_fod_pos.attr,
 	NULL,
 };
 
@@ -743,19 +831,28 @@ static ssize_t fts_get_cmoffset_dump(struct fts_ts_info *info, char *buf, u8 pos
 	u32 signature;
 
 	if (info->fts_power_state == FTS_POWER_STATE_POWERDOWN) {
-		input_err(true, &info->client->dev, "%s: [ERROR] Touch is stopped\n", __func__);
-		return snprintf(buf, info->proc_size, "TSP turned off");
+		input_err(true, &info->client->dev, "%s: Touch is stopped\n", __func__);
+		return -EPERM;
+	}
+	if (info->fts_power_state == FTS_POWER_STATE_LOWPOWER) {
+		input_err(true, &info->client->dev, "%s: Touch is LP mode\n", __func__);
+		return -EPERM;
 	}
 
 	if (info->reset_is_on_going) {
 		input_err(true, &info->client->dev, "%s: Reset is ongoing!\n", __func__);
-		return snprintf(buf, info->proc_size, "Reset is ongoing");
+		return -EPERM;
+	}
+
+	if (info->sec.cmd_is_running) {
+		input_err(true, &info->client->dev, "%s: cmd is running\n", __func__);
+		return -EBUSY;
 	}
 
 	rbuff = kzalloc(size, GFP_KERNEL);
 	if (!rbuff) {
 		input_err(true, &info->client->dev, "%s: alloc failed\n", __func__);
-		return snprintf(buf, info->proc_size, "NG, mem alloc failed");
+		return -ENOMEM;
 	}
 
 	info->fts_command(info, FTS_CMD_CLEAR_ALL_EVENT, true);
@@ -807,7 +904,7 @@ static ssize_t fts_get_cmoffset_dump(struct fts_ts_info *info, char *buf, u8 pos
 	if (signature != SEC_OFFSET_SIGNATURE) {
 		input_err(true, &info->client->dev, "%s: cmoffset[%d], signature is mismatched\n",
 				__func__, position);
-		snprintf(buf, info->proc_size, "NG, signature mismatched %08X", signature);
+		snprintf(buf, info->proc_size, "signature mismatched %08X", signature);
 		goto out;
 	}
 
@@ -945,6 +1042,15 @@ static void fw_update(void *device_data)
 	int retval = 0;
 
 	sec_cmd_set_default_result(sec);
+#if defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
+	if (sec->cmd_param[0] == 1) {
+		input_err(true, &info->client->dev, "%s: user_ship, skip\n", __func__);
+		snprintf(buff, sizeof(buff), "OK");
+		sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
+		sec->cmd_state = SEC_CMD_STATUS_OK;
+		return;
+	}
+#endif
 	if (info->fts_power_state == FTS_POWER_STATE_POWERDOWN) {
 		input_err(true, &info->client->dev, "%s: [ERROR] Touch is stopped\n",
 				__func__);
@@ -1323,10 +1429,14 @@ void fts_checking_miscal(struct fts_ts_info *info, int testmode)
 
 	if (testmode == SAVE_MISCAL_REF_RAW) {
 		/* store miscal ref raw data after CX2=0 : in autotune */
-		fts_read_frame(info, TYPE_RAW_DATA, &min, &max);
-		memcpy(&info->miscal_ref_raw[0], &info->pFrame[0],
-				info->ForceChannelLength * info->SenseChannelLength * sizeof(short));
-		input_info(true, &info->client->dev, "%s: miscal ref raw data is saved\n", __func__);
+		ret = fts_read_frame(info, TYPE_RAW_DATA, &min, &max);
+		if (ret < 0) {
+			input_err(true, &info->client->dev, "%s: failed to read raw data\n", __func__);
+		} else {
+			memcpy(&info->miscal_ref_raw[0], &info->pFrame[0],
+					info->ForceChannelLength * info->SenseChannelLength * sizeof(short));
+			input_info(true, &info->client->dev, "%s: miscal ref raw data is saved\n", __func__);
+		}
 		return;
 	} else if (testmode != OPEN_SHORT_CRACK_TEST) {
 		return;
@@ -1550,22 +1660,17 @@ int fts_panel_ito_test(struct fts_ts_info *info, int testmode)
 	fts_write_reg(info, &regAdd[0], 3);
 	fts_delay(10);
 
-#ifdef FTS_SUPPORT_TA_MODE
-	if (info->TA_Pluged) {
-		u8 wiredCharger;
-
-		regAdd[0] = FTS_CMD_SET_GET_CHARGER_MODE;
-		fts_read_reg(info, &regAdd[0], 1, &data[0], 1);
-		wiredCharger = data[0] | FTS_BIT_CHARGER_MODE_WIRE_CHARGER;
-		regAdd[1] = wiredCharger;
-		fts_write_reg(info, &regAdd[0], 2);
+	if (info->charger_mode) {
+		fts_charger_mode(info);
 		fts_delay(10);
 	}
-#endif
 
 	info->touch_count = 0;
 
-	fts_set_scanmode(info, info->scan_mode);
+	if (!info->flip_enable)
+		fts_set_scanmode(info, info->scan_mode);
+	else	
+		fts_set_scanmode(info, FTS_SCAN_MODE_SCAN_OFF);
 
 	input_raw_info(true, &info->client->dev, "%s: mode:%d [%s] %02X %02X %02X %02X\n",
 			__func__, testmode, result < 0 ? "FAIL" : "PASS",
@@ -1583,9 +1688,11 @@ static void get_fw_ver_bin(void *device_data)
 
 	sec_cmd_set_default_result(sec);
 
-	snprintf(buff, sizeof(buff), "ST00%02X%04X",
-			info->panel_revision,
-			info->fw_main_version_of_bin);
+	snprintf(buff, sizeof(buff), "ST%02X%02X%02X%02X",
+			info->ic_name_of_bin,
+			info->project_id_of_bin,
+			info->module_version_of_bin,
+			info->fw_main_version_of_bin & 0xFF);
 
 	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
 	if (sec->cmd_all_factory_state == SEC_CMD_STATUS_RUNNING)
@@ -1599,6 +1706,7 @@ static void get_fw_ver_ic(void *device_data)
 	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
 	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
 	char buff[16] = { 0 };
+	char model_ver[7] = { 0 };
 
 	sec_cmd_set_default_result(sec);
 
@@ -1607,21 +1715,30 @@ static void get_fw_ver_ic(void *device_data)
 				__func__);
 		snprintf(buff, sizeof(buff), "NG");
 		sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
-		if (sec->cmd_all_factory_state == SEC_CMD_STATUS_RUNNING)
+		if (sec->cmd_all_factory_state == SEC_CMD_STATUS_RUNNING) {
 			sec_cmd_set_cmd_result_all(sec, buff, strnlen(buff, sizeof(buff)), "FW_VER_IC");
+			sec_cmd_set_cmd_result_all(sec, buff, strnlen(buff, sizeof(buff)), "FW_MODEL");
+		}
 		sec->cmd_state = SEC_CMD_STATUS_FAIL;
 		return;
 	}
 
 	fts_get_version_info(info);
 
-	snprintf(buff, sizeof(buff), "ST00%02X%04X",
-			info->panel_revision,
-			info->fw_main_version_of_ic);
+	snprintf(buff, sizeof(buff), "ST%02X%02X%02X%02X",
+			info->ic_name_of_ic,
+			info->project_id_of_ic,
+			info->module_version_of_ic,
+			info->fw_main_version_of_ic & 0xFF);
+	snprintf(model_ver, sizeof(model_ver), "ST%02X%02X",
+			info->ic_name_of_ic,
+			info->project_id_of_ic);
 
 	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
-	if (sec->cmd_all_factory_state == SEC_CMD_STATUS_RUNNING)
+	if (sec->cmd_all_factory_state == SEC_CMD_STATUS_RUNNING) {
 		sec_cmd_set_cmd_result_all(sec, buff, strnlen(buff, sizeof(buff)), "FW_VER_IC");
+		sec_cmd_set_cmd_result_all(sec, model_ver, strnlen(model_ver, sizeof(model_ver)), "FW_MODEL");
+	}
 	sec->cmd_state = SEC_CMD_STATUS_OK;
 	input_info(true, &info->client->dev, "%s: %s\n", __func__, buff);
 }
@@ -1890,6 +2007,35 @@ static void get_checksum_data(void *device_data)
 	snprintf(buff, sizeof(buff), "%08X", checksum_data);
 	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
 	sec->cmd_state = SEC_CMD_STATUS_OK;
+	input_info(true, &info->client->dev, "%s: %s\n", __func__, buff);
+}
+
+static void check_fw_corruption(void *device_data)
+{
+	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
+	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
+	char buff[16] = { 0 };
+	int rc;
+
+	sec_cmd_set_default_result(sec);
+
+	if (info->fw_corruption) {
+		snprintf(buff, sizeof(buff), "NG");
+		sec->cmd_state = SEC_CMD_STATUS_FAIL;
+	} else {
+		rc = fts_fw_corruption_check(info);
+		if (rc == -FTS_ERROR_FW_CORRUPTION) {
+			snprintf(buff, sizeof(buff), "NG");
+			sec->cmd_state = SEC_CMD_STATUS_FAIL;
+		} else {
+			snprintf(buff, sizeof(buff), "OK");
+			sec->cmd_state = SEC_CMD_STATUS_OK;
+			fts_reinit(info, false);
+		}
+	}
+	info->fw_corruption = false;
+
+	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
 	input_info(true, &info->client->dev, "%s: %s\n", __func__, buff);
 }
 
@@ -2162,8 +2308,10 @@ static void get_pat_information(void *device_data)
 	sec_cmd_set_default_result(sec);
 
 #ifdef CONFIG_SEC_FACTORY
-	sec_tclm_initialize(info->tdata);
-	fts_tclm_data_read(info->client, SEC_TCLM_NVM_ALL_DATA);
+	if (info->factory_position == OFFSET_FAC_SUB) {
+		sec_tclm_initialize(info->tdata);
+		fts_tclm_data_read(info->client, SEC_TCLM_NVM_ALL_DATA);
+	}
 #endif
 	/* fixed tune version will be saved at excute autotune */
 	snprintf(buff, sizeof(buff), "C%02XT%04X.%4s%s%c%d%c%d%c%d",
@@ -2771,7 +2919,7 @@ static void run_cx_data_read(void *device_data)
 		snprintf(buff, sizeof(buff), "NG");
 		sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
 		if (sec->cmd_all_factory_state == SEC_CMD_STATUS_RUNNING)
-			sec_cmd_set_cmd_result_all(sec, buff, strnlen(buff, sizeof(buff)), "CX2_DATA");
+			sec_cmd_set_cmd_result_all(sec, buff, strnlen(buff, sizeof(buff)), "CX_DATA");
 		sec->cmd_state = SEC_CMD_STATUS_FAIL;
 		return;
 	}
@@ -3483,11 +3631,13 @@ int fts_tclm_data_read(struct i2c_client *client, int address)
 	int ret = 0;
 	int i = 0;
 	u8 nbuff[FTS_NVM_OFFSET_ALL];
+	u16 ic_version;
 
 	switch (address) {
 	case SEC_TCLM_NVM_OFFSET_IC_FIRMWARE_VER:
 		ret = info->fts_get_version_info(info);
-		return info->fw_main_version_of_ic;
+		ic_version = (info->module_version_of_ic << 8) | (info->fw_main_version_of_ic & 0xFF);
+		return ic_version;
 	case SEC_TCLM_NVM_ALL_DATA:
 		ret = get_nvm_data_by_size(info, nvm_data[FTS_NVM_OFFSET_FAC_RESULT].offset,
 				FTS_NVM_OFFSET_ALL, nbuff);
@@ -3690,10 +3840,22 @@ static void clear_cover_mode(void *device_data)
 		}
 
 		if (info->fts_power_state != FTS_POWER_STATE_POWERDOWN && info->reinit_done) {
-			if (info->flip_enable)
+			mutex_lock(&info->device_mutex);
+			if (info->flip_enable) {
 				fts_set_cover_type(info, true);
-			else
+				fts_set_scanmode(info, FTS_SCAN_MODE_SCAN_OFF);
+				fts_release_all_finger(info);
+#ifdef FTS_SUPPORT_TOUCH_KEY
+				fts_release_all_key(info);
+#endif
+			} else {
 				fts_set_cover_type(info, false);
+				if (info->fts_power_state == FTS_POWER_STATE_LOWPOWER)
+					fts_set_opmode(info, FTS_OPMODE_LOWPOWER);
+				else
+					fts_set_scanmode(info, info->scan_mode);
+			}
+			mutex_unlock(&info->device_mutex);
 		}
 
 		snprintf(buff, sizeof(buff), "OK");
@@ -3786,6 +3948,13 @@ out:
 }
 #endif
 
+/*	set_wirelesscharger_mode
+  *
+  *	cmd_param is refered to batteryservice.java
+  *	0 : none charge
+  *	1 : wireless charger
+  *	3 : wireless charge battery pack
+  */
 static void set_wirelesscharger_mode(void *device_data)
 {
 	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
@@ -3794,32 +3963,34 @@ static void set_wirelesscharger_mode(void *device_data)
 
 	sec_cmd_set_default_result(sec);
 
-	if (info->fts_power_state == FTS_POWER_STATE_POWERDOWN) {
-		info->charger_mode = sec->cmd_param[0];
-
-		input_err(true, &info->client->dev, "%s: [ERROR] Touch is stopped\n",
-				__func__);
+	if (sec->cmd_param[0] < 0 || sec->cmd_param[0] > 3) {
 		snprintf(buff, sizeof(buff), "NG");
-		sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
 		sec->cmd_state = SEC_CMD_STATUS_FAIL;
 		goto out;
 	}
 
-	if (sec->cmd_param[0] < 0 || sec->cmd_param[0] > 3) {
+	if (sec->cmd_param[0] == 1)
+		info->charger_mode = FTS_CHARGER_MODE_WIRELESS_CHARGER;
+	else if (sec->cmd_param[0] == 3)
+		info->charger_mode = FTS_CHARGER_MODE_WIRELESS_BATTERY_PACK;
+	else
+		info->charger_mode = FTS_CHARGER_MODE_NORMAL;
+
+	if (info->fts_power_state == FTS_POWER_STATE_POWERDOWN) {
+		input_err(true, &info->client->dev, "%s: [ERROR] Touch is stopped\n",
+				__func__);
 		snprintf(buff, sizeof(buff), "NG");
 		sec->cmd_state = SEC_CMD_STATUS_FAIL;
-	} else {
-		info->charger_mode = sec->cmd_param[0];
-
-		fts_wirelesscharger_mode(info);
-
-		snprintf(buff, sizeof(buff), "OK");
-		sec->cmd_state = SEC_CMD_STATUS_OK;
+		goto out;
 	}
-	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
-	sec->cmd_state = SEC_CMD_STATUS_WAITING;
+
+	fts_charger_mode(info);
+
+	snprintf(buff, sizeof(buff), "OK");
+	sec->cmd_state = SEC_CMD_STATUS_OK;
 
 out:
+	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
 	sec_cmd_set_cmd_exit(sec);
 
 	input_info(true, &info->client->dev, "%s: %s\n", __func__, buff);
@@ -3848,9 +4019,11 @@ out:
 void fts_set_grip_data_to_ic(struct fts_ts_info *info, u8 flag)
 {
 	u8 data[4] = { 0 };
-	u8 regAdd[6] = {0xC3, 0x00, 0x00, 0x00, 0x00, 0x00};
+	u8 regAdd[11] = {0xC1, };
 
 	input_info(true, &info->client->dev, "%s: flag: %02X (clr,lan,nor,edg,han)\n", __func__, flag);
+
+	memset(&regAdd[1], 0x00, 10); 
 
 	if (flag & G_SET_EDGE_HANDLER) {
 		if (info->grip_edgehandler_direction == 0) {
@@ -3873,66 +4046,93 @@ void fts_set_grip_data_to_ic(struct fts_ts_info *info, u8 flag)
 		regAdd[5] = data[3];
 
 		fts_write_reg(info, regAdd, 6);
-		input_info(true, &info->client->dev, "%s: 0x%02X %02X,%02X,%02X,%02X\n",
-				__func__, FTS_CMD_EDGE_HANDLER, data[0], data[1], data[2], data[3]);
 	}
 
 	if (flag & G_SET_EDGE_ZONE) {
-		data[0] = (info->grip_edge_range >> 8) & 0xFF;
-		data[1] = info->grip_edge_range  & 0xFF;
-
+		/* ex) C1 07 00 3E 00 3E
+		*	- 0x003E(60) px : Grip Right zone
+		*	- 0x003E(60) px : Grip Left zone
+		*/
 		regAdd[1] = FTS_CMD_EDGE_AREA;
-		regAdd[2] = data[0];
-		regAdd[3] = data[1];
+		regAdd[2] = (info->grip_edge_range >> 8) & 0xFF;
+		regAdd[3] = info->grip_edge_range & 0xFF;
+		regAdd[4] = (info->grip_edge_range >> 8) & 0xFF;
+		regAdd[5] = info->grip_edge_range & 0xFF;
 
-		fts_write_reg(info, regAdd, 4);
-		input_info(true, &info->client->dev, "%s: 0x%02X %02X,%02X\n",
-				__func__, FTS_CMD_EDGE_AREA, data[0], data[1]);
+		fts_write_reg(info, regAdd, 6);
 	}
 
 	if (flag & G_SET_NORMAL_MODE) {
-		data[0] = info->grip_deadzone_up_x & 0xFF;
-		data[1] = info->grip_deadzone_dn_x & 0xFF;
-		data[2] = (info->grip_deadzone_y >> 8) & 0xFF;
-		data[3] = info->grip_deadzone_y & 0xFF;
-
+		/* ex) C1 08 1E 1E 00 00
+		*	- 0x1E (30) px : upper X range
+		*	- 0x1E (30) px : lower X range
+		*	- 0x0000 (0) px : division Y
+		*/
 		regAdd[1] = FTS_CMD_DEAD_ZONE;
-		regAdd[2] = data[0];
-		regAdd[3] = data[1];
-		regAdd[4] = data[2];
-		regAdd[5] = data[3];
+		regAdd[2] = info->grip_deadzone_up_x & 0xFF;
+		regAdd[3] = info->grip_deadzone_dn_x & 0xFF;
+		regAdd[4] = (info->grip_deadzone_y >> 8) & 0xFF;
+		regAdd[5] = info->grip_deadzone_y & 0xFF;
 
 		fts_write_reg(info, regAdd, 6);
-		input_info(true, &info->client->dev, "%s: 0x%02X %02X,%02X,%02X,%02X\n",
-				__func__, FTS_CMD_DEAD_ZONE, data[0], data[1], data[2], data[3]);
 	}
 
 	if (flag & G_SET_LANDSCAPE_MODE) {
-		data[0] = info->grip_landscape_mode & 0x1;
-		data[1] = (info->grip_landscape_edge >> 4) & 0xFF;
-		data[2] = (info->grip_landscape_edge << 4 & 0xF0) | ((info->grip_landscape_deadzone >> 8) & 0xF);
-		data[3] = info->grip_landscape_deadzone & 0xFF;
-
+		/* ex) C1 09 01 00 3C 00 3C 00 1E
+		*	- 0x01 : horizontal mode
+		*	- 0x03C (60) px : Grip zone range (Right)
+		*	- 0x03C (60) px : Grip zone range (Left)
+		*	- 0x01E (30) px : Reject zone range (Left/Right)
+		*/
 		regAdd[1] = FTS_CMD_LANDSCAPE_MODE;
-		regAdd[2] = data[0];
-		regAdd[3] = data[1];
-		regAdd[4] = data[2];
-		regAdd[5] = data[3];
+		regAdd[2] = info->grip_landscape_mode;
+		regAdd[3] = (info->grip_landscape_edge >> 8) & 0xFF;
+		regAdd[4] = info->grip_landscape_edge & 0xFF;
+		regAdd[5] = (info->grip_landscape_edge >> 8) & 0xFF;
+		regAdd[6] = info->grip_landscape_edge & 0xFF;
+		regAdd[7] = (info->grip_landscape_deadzone >> 8) & 0xFF;
+		regAdd[8] = info->grip_landscape_deadzone & 0xFF;
 
-		fts_write_reg(info, regAdd, 6);
-		input_info(true, &info->client->dev, "%s: 0x%02X %02X,%02X,%02X,%02X\n",
-				__func__, FTS_CMD_LANDSCAPE_MODE, data[0], data[1], data[2], data[3]);
+		fts_write_reg(info, regAdd, 9);
+
+		/*ex) C1 0A 01 00 3C 00 3C 00 1E 00 1E
+		*	- 0x01(1) : Enable function
+		*	- 0x003C (60) px : Grip Top zone range
+		*	- 0x001E (60) px : Grip Bottom zone range
+		*	- 0x001E (30) px : Reject Top zone range
+		*	- 0x001E (30) px : Reject Bottom zone range
+		*/
+		regAdd[1] = FTS_CMD_LANDSCAPE_TOP_BOTTOM;
+		regAdd[2] = info->grip_landscape_mode;
+		regAdd[3] = (info->grip_landscape_top_gripzone >> 8)& 0xFF;
+		regAdd[4] = info->grip_landscape_top_gripzone & 0xFF;
+		regAdd[5] = (info->grip_landscape_bottom_gripzone >> 8)& 0xFF;
+		regAdd[6] = info->grip_landscape_bottom_gripzone & 0xFF;
+		regAdd[7] = (info->grip_landscape_top_deadzone >> 8)& 0xFF;
+		regAdd[8] = info->grip_landscape_top_deadzone & 0xFF;
+		regAdd[9] = (info->grip_landscape_bottom_deadzone >> 8)& 0xFF;
+		regAdd[10] = info->grip_landscape_bottom_deadzone & 0xFF;
+
+		fts_write_reg(info, regAdd, 11);
 	}
 
 	if (flag & G_CLR_LANDSCAPE_MODE) {
-		data[0] = info->grip_landscape_mode;
+		memset(&regAdd[1], 0x00, 10); 
 
+		/* ex) C1 09  00 00 00 00 00 00 00
+		*	- 0x00 : Apply previous vertical mode value for grip zone and reject zone range
+		*/
 		regAdd[1] = FTS_CMD_LANDSCAPE_MODE;
-		regAdd[2] = data[0];
+		regAdd[2] = info->grip_landscape_mode;
 
-		fts_write_reg(info, regAdd, 3);
-		input_info(true, &info->client->dev, "%s: 0x%02X %02X\n",
-				__func__, FTS_CMD_LANDSCAPE_MODE, data[0]);
+		fts_write_reg(info, regAdd, 9);
+
+		/*ex) C1 0A 00 00 00 00 00 00 00 00 00
+		*	- Disable function
+		*/
+		regAdd[1] = FTS_CMD_LANDSCAPE_TOP_BOTTOM;
+
+		fts_write_reg(info, regAdd, 11);
 	}
 }
 
@@ -4010,6 +4210,8 @@ static void set_grip_data(void *device_data)
 			info->grip_landscape_deadzone = sec->cmd_param[3];
 			info->grip_landscape_top_deadzone = sec->cmd_param[4];
 			info->grip_landscape_bottom_deadzone = sec->cmd_param[5];
+			info->grip_landscape_top_gripzone = sec->cmd_param[6];
+			info->grip_landscape_bottom_gripzone = sec->cmd_param[7];
 			mode = mode | G_SET_LANDSCAPE_MODE;
 		} else {
 			input_err(true, &info->client->dev, "%s: cmd1 is abnormal, %d (%d)\n",
@@ -4097,9 +4299,7 @@ static void spay_enable(void *device_data)
 	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
 	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
 	char buff[SEC_CMD_STR_LEN] = { 0 };
-#ifdef FTS_SUPPORT_SPONGELIB
 	int ret = 0;
-#endif
 
 	sec_cmd_set_default_result(sec);
 
@@ -4108,7 +4308,6 @@ static void spay_enable(void *device_data)
 	else
 		info->lowpower_flag &= ~FTS_MODE_SPAY;
 
-#ifdef FTS_SUPPORT_SPONGELIB
 	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_OFFSET_MODE,
 			&info->lowpower_flag, sizeof(info->lowpower_flag));
 	if (ret < 0) {
@@ -4118,7 +4317,6 @@ static void spay_enable(void *device_data)
 
 		goto out;
 	}
-#endif
 
 	snprintf(buff, sizeof(buff), "OK");
 	sec->cmd_state = SEC_CMD_STATUS_OK;
@@ -4136,9 +4334,7 @@ static void aot_enable(void *device_data)
 {
 	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
 	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
-#ifdef FTS_SUPPORT_SPONGELIB
 	int ret = 0;
-#endif
 	char buff[SEC_CMD_STR_LEN] = { 0 };
 
 	sec_cmd_set_default_result(sec);
@@ -4148,7 +4344,6 @@ static void aot_enable(void *device_data)
 	else
 		info->lowpower_flag &= ~FTS_MODE_DOUBLETAP_WAKEUP;
 
-#ifdef FTS_SUPPORT_SPONGELIB
 	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_OFFSET_MODE,
 			&info->lowpower_flag, sizeof(info->lowpower_flag));
 	if (ret < 0) {
@@ -4159,7 +4354,7 @@ static void aot_enable(void *device_data)
 		sec_cmd_set_cmd_exit(sec);
 		return;
 	}
-#endif
+
 	snprintf(buff, sizeof(buff), "OK");
 	sec->cmd_state = SEC_CMD_STATUS_OK;
 	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
@@ -4171,9 +4366,7 @@ static void aod_enable(void *device_data)
 {
 	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
 	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
-#ifdef FTS_SUPPORT_SPONGELIB
 	int ret = 0;
-#endif
 	char buff[SEC_CMD_STR_LEN] = { 0 };
 
 	sec_cmd_set_default_result(sec);
@@ -4183,7 +4376,6 @@ static void aod_enable(void *device_data)
 	else
 		info->lowpower_flag &= ~FTS_MODE_AOD;
 
-#ifdef FTS_SUPPORT_SPONGELIB
 	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_OFFSET_MODE,
 			&info->lowpower_flag, sizeof(info->lowpower_flag));
 	if (ret < 0) {
@@ -4194,7 +4386,7 @@ static void aod_enable(void *device_data)
 		sec_cmd_set_cmd_exit(sec);
 		return;
 	}
-#endif
+
 	snprintf(buff, sizeof(buff), "OK");
 	sec->cmd_state = SEC_CMD_STATUS_OK;
 	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
@@ -4202,13 +4394,32 @@ static void aod_enable(void *device_data)
 	input_info(true, &info->client->dev, "%s: %d\n", __func__, sec->cmd_param[0]);
 }
 
+int fts_set_aod_rect(struct fts_ts_info *info)
+{
+	int i, ret;
+	u8 data[8];
+
+	if (!info->use_sponge)
+		return 0;
+
+	for (i = 0; i < 4; i++) {
+		data[i * 2] = info->rect_data[i] & 0xFF;
+		data[i * 2 + 1] = (info->rect_data[i] >> 8) & 0xFF;
+	}
+
+	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_OFFSET_AOD_RECT, data, sizeof(data));
+	if (ret < 0)
+		input_err(true, &info->client->dev, "%s: failed. ret: %d\n", __func__, ret);
+
+	return ret;
+}
+
 static void set_aod_rect(void *device_data)
 {
 	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
 	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
 	char buff[SEC_CMD_STR_LEN] = { 0 };
-	u8 data[8] = {0, };
-	int i, ret = -1;
+	int i, ret;
 
 	sec_cmd_set_default_result(sec);
 
@@ -4218,18 +4429,10 @@ static void set_aod_rect(void *device_data)
 			sec->cmd_param[2], sec->cmd_param[3]);
 #endif
 
-	for (i = 0; i < 4; i++) {
-		data[i * 2] = sec->cmd_param[i] & 0xFF;
-		data[i * 2 + 1] = (sec->cmd_param[i] >> 8) & 0xFF;
+	for (i = 0; i < 4; i++)
 		info->rect_data[i] = sec->cmd_param[i];
-	}
 
-#ifdef FTS_SUPPORT_SPONGELIB
-	if (!info->use_sponge)
-		goto NG;
-
-	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_OFFSET_AOD_RECT, data, sizeof(data));
-#endif
+	ret = fts_set_aod_rect(info);
 	if (ret < 0) {
 		input_err(true, &info->client->dev, "%s: failed. ret: %d\n", __func__, ret);
 		goto NG;
@@ -4255,16 +4458,11 @@ static void get_aod_rect(void *device_data)
 	char buff[SEC_CMD_STR_LEN] = { 0 };
 	u8 data[8] = {0, };
 	u16 rect_data[4] = {0, };
-	int i, ret = -1;
+	int i, ret;
 
 	sec_cmd_set_default_result(sec);
 
-#ifdef FTS_SUPPORT_SPONGELIB
-	if (!info->use_sponge)
-		goto NG;
-
 	ret = info->fts_read_from_sponge(info, FTS_CMD_SPONGE_OFFSET_AOD_RECT, data, sizeof(data));
-#endif
 	if (ret < 0) {
 		input_err(true, &info->client->dev, "%s: failed. ret: %d\n", __func__, ret);
 		goto NG;
@@ -4286,6 +4484,159 @@ static void get_aod_rect(void *device_data)
 NG:
 	snprintf(buff, sizeof(buff), "NG");
 	sec->cmd_state = SEC_CMD_STATUS_FAIL;
+	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
+	sec_cmd_set_cmd_exit(sec);
+}
+
+static void fod_enable(void *device_data)
+{
+	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
+	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
+	int ret = 0;
+	char buff[SEC_CMD_STR_LEN] = { 0 };
+
+	sec_cmd_set_default_result(sec);
+
+	if (!info->board->support_fod) {
+		input_err(true, &info->client->dev, "%s: fod is not supported\n", __func__);
+		snprintf(buff, sizeof(buff), "%s", "NA");
+		sec->cmd_state = SEC_CMD_STATUS_FAIL;
+		goto out;
+	}
+
+	if (sec->cmd_param[0])
+		info->lowpower_flag |= FTS_MODE_PRESS;
+	else
+		info->lowpower_flag &= ~FTS_MODE_PRESS;
+
+	info->press_prop = !!sec->cmd_param[1];
+
+	input_info(true, &info->client->dev, "%s: %s, fast:%d, 0x%02X\n",
+			__func__, sec->cmd_param[0] ? "on" : "off",
+			info->press_prop, info->lowpower_flag);
+
+	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_OFFSET_MODE,
+			&info->lowpower_flag, sizeof(info->lowpower_flag));
+	if (ret < 0) {
+		input_err(true, &info->client->dev,
+				"%s: failed. ret: %d\n", __func__, ret);
+		snprintf(buff, sizeof(buff), "%s", "NG");
+		sec->cmd_state = SEC_CMD_STATUS_FAIL;
+		goto out;
+	}
+
+	fts_set_press_property(info);
+	fts_set_fod_finger_merge(info);
+
+	snprintf(buff, sizeof(buff), "OK");
+	sec->cmd_state = SEC_CMD_STATUS_OK;
+out:
+	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
+	sec_cmd_set_cmd_exit(sec);
+}
+
+int fts_set_fod_rect(struct fts_ts_info *info)
+{
+	int i, ret;
+	u8 data[8];
+	u32 sum = 0;
+
+	if (!info->use_sponge)
+		return 0;
+
+	for (i = 0; i < 4; i++) {
+		data[i * 2] = info->fod_rect_data[i] & 0xFF;
+		data[i * 2 + 1] = (info->fod_rect_data[i] >> 8) & 0xFF;
+		sum += info->fod_rect_data[i];
+	}
+
+	if (!sum) /* no data */
+		return 0;
+
+	input_info(true, &info->client->dev, "%s: l:%d, t:%d, r:%d, b:%d\n",
+			__func__, info->fod_rect_data[0], info->fod_rect_data[1],
+			info->fod_rect_data[2], info->fod_rect_data[3]);
+
+	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_FOD_RECT, data, sizeof(data));
+	if (ret < 0)
+		input_err(true, &info->client->dev, "%s: failed. ret: %d\n", __func__, ret);
+
+	return ret;
+}
+
+static void set_fod_rect(void *device_data)
+{
+	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
+	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
+	char buff[SEC_CMD_STR_LEN] = { 0 };
+	int i, ret;
+
+	sec_cmd_set_default_result(sec);
+
+	if (sec->cmd_param[0] > info->board->display_x
+			|| sec->cmd_param[1] > info->board->display_y
+			|| sec->cmd_param[2] > info->board->display_x
+			|| sec->cmd_param[3] > info->board->display_y) {
+		input_err(true, &info->client->dev, "%s: Abnormal fod_rect data\n", __func__);
+		goto NG;
+	}
+
+	input_info(true, &info->client->dev, "%s: l:%d, t:%d, r:%d, b:%d\n",
+			__func__, sec->cmd_param[0], sec->cmd_param[1],
+			sec->cmd_param[2], sec->cmd_param[3]);
+
+	for (i = 0; i < 4; i++)
+		info->fod_rect_data[i] = sec->cmd_param[i];
+
+	ret = fts_set_fod_rect(info);
+	if (ret < 0) {
+		input_err(true, &info->client->dev, "%s: failed. ret: %d\n", __func__, ret);
+		goto NG;
+	}
+
+	snprintf(buff, sizeof(buff), "OK");
+	sec->cmd_state = SEC_CMD_STATUS_OK;
+	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
+	sec_cmd_set_cmd_exit(sec);
+	return;
+NG:
+
+	snprintf(buff, sizeof(buff), "NG");
+	sec->cmd_state = SEC_CMD_STATUS_FAIL;
+	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
+	sec_cmd_set_cmd_exit(sec);
+}
+
+static void singletap_enable(void *device_data)
+{
+	struct sec_cmd_data *sec = (struct sec_cmd_data *)device_data;
+	struct fts_ts_info *info = container_of(sec, struct fts_ts_info, sec);
+	int ret = 0;
+	char buff[SEC_CMD_STR_LEN] = { 0 };
+
+	sec_cmd_set_default_result(sec);
+
+	if (sec->cmd_param[0])
+		info->lowpower_flag |= FTS_MODE_SINGLETAP;
+	else
+		info->lowpower_flag &= ~FTS_MODE_SINGLETAP;
+
+	input_info(true, &info->client->dev, "%s: %s, 0x%02X\n",
+			__func__, sec->cmd_param[0] ? "on" : "off", info->lowpower_flag);
+
+	ret = info->fts_write_to_sponge(info, FTS_CMD_SPONGE_OFFSET_MODE,
+			&info->lowpower_flag, sizeof(info->lowpower_flag));
+	if (ret < 0) {
+		input_err(true, &info->client->dev,
+				"%s: failed. ret: %d\n", __func__, ret);
+		snprintf(buff, sizeof(buff), "%s", "NG");
+		sec->cmd_state = SEC_CMD_STATUS_FAIL;
+		goto out;
+	}
+
+	snprintf(buff, sizeof(buff), "OK");
+	sec->cmd_state = SEC_CMD_STATUS_OK;
+out:
 	sec_cmd_set_cmd_result(sec, buff, strnlen(buff, sizeof(buff)));
 	sec_cmd_set_cmd_exit(sec);
 }
@@ -4646,6 +4997,22 @@ autotune_fail:
 
 	input_info(true, &info->client->dev, "%s: %s\n", __func__, buff);
 }
+
+#ifdef CONFIG_INPUT_WACOM
+/*
+ *	set scan mode by epen driver
+ * 
+ *	mode
+ *	0 : Return to normal mode
+ *	1 : Enter sleep mode & release pressed fingers
+ */
+
+int set_scan_mode(int mode)
+{
+	return mode;
+}
+EXPORT_SYMBOL(set_scan_mode);
+#endif
 
 #ifdef FTS_SUPPORT_TOUCH_KEY
 int read_touchkey_data(struct fts_ts_info *info, u8 type, unsigned int keycode)

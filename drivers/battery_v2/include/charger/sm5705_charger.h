@@ -67,7 +67,11 @@ enum {
     SM5705_BUCK_BOOST_FREQ_1_8MHz   =	0x3,
 };
 /* for VZW support */
+#if defined(CONFIG_TABLET_MODEL_CONCEPT) && !defined(CONFIG_SEC_FACTORY)
+#define SLOW_CHARGING_CURRENT_STANDARD	1000
+#else
 #define SLOW_CHARGING_CURRENT_STANDARD	400
+#endif
 /* SM5705 Charger - AICL reduce current configuration */
 #define REDUCE_CURRENT_STEP		100
 #define MINIMUM_INPUT_CURRENT		300
@@ -95,6 +99,7 @@ struct sm5705_charger_data {
 	struct mutex charger_mutex;
 	struct workqueue_struct *wqueue;
 	struct delayed_work wpc_work;
+	struct delayed_work slow_chg_work;
 	struct delayed_work aicl_work;
 #if defined(CONFIG_USE_POGO)
 	struct delayed_work pogo_work;
@@ -117,6 +122,7 @@ struct sm5705_charger_data {
 	unsigned int input_current;
 	unsigned int charging_current;
 	int	irq_wpcin_state;
+	int aicl_on;
 	bool topoff_pending;
 	// temp for rev2 SW WA
 	bool is_rev2_wa_done;

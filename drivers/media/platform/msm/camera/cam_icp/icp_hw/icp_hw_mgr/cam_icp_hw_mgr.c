@@ -2569,7 +2569,7 @@ static int cam_icp_mgr_abort_handle(
 
 		CAM_ERR(CAM_ICP, "FW timeout/err in abort handle command");
 		//cam_hfi_queue_dump();
-		BUG_ON(1);
+		//BUG_ON(1);
 	}
 
 	kfree(abort_cmd);
@@ -2626,7 +2626,7 @@ static int cam_icp_mgr_destroy_handle(
 		if (icp_hw_mgr.a5_debug_type ==
 			HFI_DEBUG_MODE_QUEUE)
 			cam_icp_mgr_process_dbg_buf();
-		//cam_hfi_queue_dump();
+		cam_hfi_queue_dump();
 		BUG_ON(1);
 	}
 	kfree(destroy_cmd);
@@ -3185,7 +3185,7 @@ static int cam_icp_mgr_send_config_io(struct cam_icp_hw_ctx_data *ctx_data,
 		rc = -ETIMEDOUT;
 		CAM_ERR(CAM_ICP, "FW response timed out %d", rc);
 		//cam_hfi_queue_dump();
-        	BUG_ON(1);        
+        	BUG_ON(1);
 	}
 
 	return rc;
@@ -3897,7 +3897,7 @@ static int cam_icp_mgr_validate_io_buf(struct cam_packet *packet,
     int        i, j, rc = 0;
     int32_t    mmu_hdl;
     struct cam_buf_io_cfg *io_cfg = NULL;
-    size_t     min_size = 0; 
+    size_t     min_size = 0;
     io_cfg = (struct cam_buf_io_cfg *)((uint32_t *)&packet->payload +
                 packet->io_configs_offset / 4);
     for (i = 0; i < packet->num_io_configs; i++) {
@@ -4362,7 +4362,7 @@ static int cam_icp_mgr_release_hw(void *hw_mgr_priv, void *release_hw_args)
 	if ((!hw_mgr->bps_ctxt_cnt || !hw_mgr->ipe_ctxt_cnt))
 		cam_icp_device_timer_stop(hw_mgr);
 
-	CAM_DBG(CAM_ICP, "Release done for ctx_id %d", ctx_id);
+	CAM_INFO(CAM_ICP, "Release done for ctx_id %d", ctx_id);
 	return rc;
 }
 
@@ -4503,7 +4503,7 @@ static int cam_icp_get_acquire_info(struct cam_icp_hw_mgr *hw_mgr,
 		return -EFAULT;
 	}
 
-	CAM_DBG(CAM_ICP, "%x %x %x %x %x %x %x",
+	CAM_INFO(CAM_ICP, "%x %x %x %x %x %x %x",
 		ctx_data->icp_dev_acquire_info->dev_type,
 		ctx_data->icp_dev_acquire_info->in_res.format,
 		ctx_data->icp_dev_acquire_info->in_res.width,
@@ -4694,7 +4694,7 @@ static int cam_icp_mgr_acquire_hw(void *hw_mgr_priv, void *acquire_hw_args)
 	cam_icp_ctx_timer_start(ctx_data);
 	hw_mgr->ctxt_cnt++;
 	mutex_unlock(&hw_mgr->hw_mgr_mutex);
-	CAM_DBG(CAM_ICP, "Acquire Done for ctx_id %u dev name %s dev type %d",
+	CAM_INFO(CAM_ICP, "Acquire Done for ctx_id %u dev name %s dev type %d",
 		ctx_data->ctx_id, cam_icp_dev_type_to_name(
 		icp_dev_acquire_info->dev_type),
 		icp_dev_acquire_info->dev_type);

@@ -4,7 +4,7 @@
  * Copyright (C) Linaro 2012
  * Author: <benjamin.gaignard@linaro.org> for ST-Ericsson.
  *
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -212,6 +212,9 @@ static int ion_secure_cma_allocate(
 			unsigned long flags)
 {
 	int ret;
+
+	if (!(flags & ION_FLAGS_CP_MASK))
+		return -EINVAL;
 
 	ret = ion_cma_allocate(heap, buffer, len, flags);
 	if (ret) {

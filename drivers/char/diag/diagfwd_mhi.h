@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -74,6 +74,7 @@ struct diag_mhi_info {
 	wait_queue_head_t mhi_wait_q;
 	struct diag_mhi_ch_t read_ch;
 	struct diag_mhi_ch_t write_ch;
+	struct mutex ch_mutex;
 	spinlock_t lock;
 };
 
@@ -82,4 +83,5 @@ extern struct diag_mhi_info diag_mhi[NUM_MHI_DEV];
 int diag_mhi_init(void);
 void diag_mhi_exit(void);
 void diag_register_with_mhi(void);
+void diag_unregister_mhi(void);
 #endif

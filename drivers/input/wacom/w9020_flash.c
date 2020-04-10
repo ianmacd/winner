@@ -124,7 +124,7 @@ static bool wacom_i2c_get_feature(struct wacom_i2c *wac_i2c, u8 report_id,
 	}
 
 	/*Coppy data pointer, subtracting the first two bytes of the length */
-	memcpy(data, (recv + 2), total);
+	memcpy(data, (recv + 2), buf_size);
 
 	bRet = true;
 err_fail_i2c:
@@ -515,8 +515,13 @@ static int wacom_i2c_flash_w9020(struct wacom_i2c *wac_i2c, unsigned char *fw_da
 	struct i2c_client *client = wac_i2c->client;
 	bool bRet = false;
 	int iBLVer = 0, iMpuType = 0;
+#ifdef CONFIG_EPEN_WACOM_W9021
+	unsigned long max_address = W9021_END_ADDR;	/* Max.address of Load data */
+	unsigned long start_address = W9021_START_ADDR; /* Start.address of Load data */
+#else
 	unsigned long max_address = W9020_END_ADDR;	/* Max.address of Load data */
-	unsigned long start_address = W9020_START_ADDR;	/* Start.address of Load data */
+	unsigned long start_address = W9020_START_ADDR; /* Start.address of Load data */
+#endif
 
 	/*Obtain boot loader version */
 	if (!flash_blver_w9020(wac_i2c, &iBLVer)) {
@@ -532,11 +537,19 @@ static int wacom_i2c_flash_w9020(struct wacom_i2c *wac_i2c, unsigned char *fw_da
 			  "%s failed to get MPU type\n", __func__);
 		return -EXIT_FAIL_GET_MPU_TYPE;
 	}
+#ifdef CONFIG_EPEN_WACOM_W9021
+	if (iMpuType != MPU_W9021) {
+		input_err(true, &client->dev,
+			  "MPU is not for W9021 : %x\n", iMpuType);
+		return -EXIT_FAIL_GET_MPU_TYPE;
+	}
+#else
 	if (iMpuType != MPU_W9020) {
 		input_err(true, &client->dev,
 			  "MPU is not for W9020 : %x\n", iMpuType);
 		return -EXIT_FAIL_GET_MPU_TYPE;
 	}
+#endif
 	input_info(true, &client->dev, "MPU type: %x\n", iMpuType);
 
 	/*-----------------------------------*/

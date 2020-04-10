@@ -117,6 +117,7 @@ struct flash_only_data {
 	int init_done; 	/* To check reading operation done */
 
 	bool checksum;
+	bool sysfs;		/* work from sysfs */
 	unsigned int check_sum_flash_data;
 	unsigned int check_sum_cal_data;
 	unsigned int force_table_interpolatioin; /* For getting table output - debugging purpose */

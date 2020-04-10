@@ -307,8 +307,6 @@ static int init_rootdomain(struct root_domain *rd)
 
 	init_max_cpu_capacity(&rd->max_cpu_capacity);
 
-	init_max_cpu_capacity(&rd->max_cpu_capacity);
-
 	return 0;
 
 free_cpudl:
@@ -544,7 +542,7 @@ static int __init isolated_cpu_setup(char *str)
 __setup("isolcpus=", isolated_cpu_setup);
 
 struct s_data {
-	struct sched_domain ** __percpu sd;
+	struct sched_domain * __percpu *sd;
 	struct root_domain	*rd;
 };
 

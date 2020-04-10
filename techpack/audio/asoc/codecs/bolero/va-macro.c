@@ -46,7 +46,7 @@
 #define VA_MACRO_TX_DMIC_CLK_DIV_SHFT 0x01
 
 #define BOLERO_CDC_VA_TX_UNMUTE_DELAY_MS	40
-#define MAX_RETRY_ATTEMPTS 250
+#define MAX_RETRY_ATTEMPTS 200
 
 static const DECLARE_TLV_DB_SCALE(digital_gain, 0, 1, 0);
 static int va_tx_unmute_delay = BOLERO_CDC_VA_TX_UNMUTE_DELAY_MS;
@@ -154,8 +154,7 @@ static int va_macro_mclk_enable(struct va_macro_priv *va_priv,
 
 	mutex_lock(&va_priv->mclk_lock);
 	if (mclk_enable) {
-		va_priv->va_mclk_users++;
-		if (va_priv->va_mclk_users == 1) {
+		if (va_priv->va_mclk_users == 0) {
 			ret = bolero_request_clock(va_priv->dev,
 						VA_MACRO, MCLK_MUX0, true);
 			if (ret < 0) {
@@ -178,8 +177,16 @@ static int va_macro_mclk_enable(struct va_macro_priv *va_priv,
 				BOLERO_CDC_VA_TOP_CSR_TOP_CFG0,
 				0x02, 0x02);
 		}
+		va_priv->va_mclk_users++;
 	} else {
-		if (va_priv->va_mclk_users == 1) {
+		if (va_priv->va_mclk_users <= 0) {
+			dev_err(va_priv->dev, "%s: clock already disabled\n",
+			__func__);
+			va_priv->va_mclk_users = 0;
+			goto exit;
+		}
+		va_priv->va_mclk_users--;
+		if (va_priv->va_mclk_users == 0) {
 			regmap_update_bits(regmap,
 				BOLERO_CDC_VA_TOP_CSR_TOP_CFG0,
 				0x02, 0x00);
@@ -192,7 +199,6 @@ static int va_macro_mclk_enable(struct va_macro_priv *va_priv,
 			bolero_request_clock(va_priv->dev,
 					VA_MACRO, MCLK_MUX0, false);
 		}
-		va_priv->va_mclk_users--;
 	}
 exit:
 	mutex_unlock(&va_priv->mclk_lock);
@@ -212,12 +218,15 @@ static int va_macro_event_handler(struct snd_soc_codec *codec, u16 event,
 	switch (event) {
 	case BOLERO_MACRO_EVT_WAIT_VA_CLK_RESET:
 		while ((va_priv->va_mclk_users != 0) && (retry_cnt != 0)) {
-			dev_dbg(va_dev, "%s:retry_cnt: %d\n",
+			dev_dbg_ratelimited(va_dev, "%s:retry_cnt: %d\n",
 				__func__, retry_cnt);
 			/*
-			 * loop and check every 20ms for va_mclk user count
-			 * to get reset to 0 which ensures userspace teardown
-			 * is done and SSR powerup seq can proceed.
+			 * Userspace takes 10 seconds to close
+			 * the session when pcm_start fails due to concurrency
+			 * with PDR/SSR. Loop and check every 20ms till 10
+			 * seconds for va_mclk user count to get reset to 0
+			 * which ensures userspace teardown is done and SSR
+			 * powerup seq can proceed.
 			 */
 			msleep(20);
 			retry_cnt--;

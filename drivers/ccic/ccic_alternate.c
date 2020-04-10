@@ -21,20 +21,30 @@
  */
 #include <linux/ccic/s2mm005.h>
 #include <linux/ccic/s2mm005_ext.h>
+#if defined(CONFIG_CCIC_ALTERNATE_MODE)
 #include <linux/ccic/ccic_alternate.h>
+#endif
 #if defined(CONFIG_CCIC_NOTIFIER)
 #include <linux/ccic/ccic_core.h>
 #endif
 #if defined(CONFIG_USB_HOST_NOTIFY)
 #include <linux/usb_notify.h>
 #endif
+/* switch device header */
+#if defined(CONFIG_SWITCH)
+#include <linux/switch.h>
+#endif /* CONFIG_SWITCH */
+#include <linux/usb_notify.h>
+
+#define MAX_INPUT_DATA (255)
+
 ////////////////////////////////////////////////////////////////////////////////
 // s2mm005_cc.c called s2mm005_alternate.c
 ////////////////////////////////////////////////////////////////////////////////
 #if defined(CONFIG_CCIC_ALTERNATE_MODE)
-
 extern int dwc3_msm_is_suspended(void);
 extern int dwc3_msm_is_host_highspeed(void);
+extern int dwc3_restart_usb_host_mode_hs(void);
 extern struct s2mm005_data *g_usbpd_data;
 
 static char VDM_MSG_IRQ_State_Print[9][40] =
@@ -61,6 +71,9 @@ static char DP_Pin_Assignment_Print[7][40] =
     {"DP_Pin_Assignment_F"},
 
 };
+////////////////////////////////////////////////////////////////////////////////
+// Alternate mode processing
+////////////////////////////////////////////////////////////////////////////////
 
 void acc_detach_check(struct work_struct *wk)
 {
@@ -69,12 +82,11 @@ void acc_detach_check(struct work_struct *wk)
 	struct s2mm005_data *usbpd_data =
 		container_of(delay_work, struct s2mm005_data, acc_detach_work);
 
-	pr_info("%s: usbpd_data->pd_state : %d\n", __func__,
-		usbpd_data->pd_state);
+	pr_info("%s: usbpd_data->pd_state : %d\n", __func__, usbpd_data->pd_state);
 	if (usbpd_data->pd_state == State_PE_Initial_detach) {
 		if (usbpd_data->acc_type != CCIC_DOCK_DETACHED) {
 			if (usbpd_data->acc_type != CCIC_DOCK_NEW)
-				ccic_send_dock_intent(CCIC_DOCK_DETACHED);
+			ccic_send_dock_intent(CCIC_DOCK_DETACHED);
 			ccic_send_dock_uevent(usbpd_data->Vendor_ID,
 					usbpd_data->Product_ID,
 					CCIC_DOCK_DETACHED);
@@ -127,8 +139,8 @@ void acc_detach_process(void *data)
 void set_usb_phy_completion(int kind)
 {
 	struct s2mm005_data *usbpd_data;
-	usbpd_data = g_usbpd_data;
 
+	usbpd_data = g_usbpd_data;
 	if(!usbpd_data)
 		return;
 
@@ -173,6 +185,7 @@ void set_enable_alternate_mode(int mode)
 			s2mm005_write_byte(usbpd_data->i2c, 0x10, &W_DATA[0], 2);
 			pr_info("%s : alternate mode is reset as start! \n",	__func__);
 			prev_alternate_mode = ALTERNATE_MODE_START;
+			set_enable_powernego(1);
 		} else if (check_is_driver_loaded && (prev_alternate_mode == ALTERNATE_MODE_STOP)) {
 			W_DATA[0] = 0x3;
 			W_DATA[1] = 0x33;
@@ -238,10 +251,12 @@ void set_host_turn_on_event(int mode)
 
 	pr_info("%s : current_set is %d! \n", __func__, mode);
 	if(mode) {
+		usbpd_data->detach_done_wait = 0;
 		usbpd_data->host_turn_on_event = 1;
 		wake_up_interruptible(&usbpd_data->host_turn_on_wait_q);
 	}
 	else {
+		usbpd_data->detach_done_wait = 0;
 		usbpd_data->host_turn_on_event = 0;
 	}
 }
@@ -314,7 +329,7 @@ int get_diplayport_status(void)
 	return usbpd_data->dp_is_connect;
 }
 
-static int process_check_accessory(void * data)
+int process_check_accessory(void * data)
 {
 	struct s2mm005_data *usbpd_data = data;
 #if defined(CONFIG_USB_HOST_NOTIFY) && defined(CONFIG_USB_HW_PARAM)
@@ -322,7 +337,7 @@ static int process_check_accessory(void * data)
 #endif
 	uint16_t vid = usbpd_data->Vendor_ID;
 	uint16_t pid = usbpd_data->Product_ID;
-	uint16_t dock_type = 0;
+	uint16_t acc_type = CCIC_DOCK_DETACHED;
 
 	/* detect Gear VR */
 	if (usbpd_data->acc_type == CCIC_DOCK_DETACHED) {
@@ -335,7 +350,7 @@ static int process_check_accessory(void * data)
 			case GEARVR_PRODUCT_ID_3:
 			case GEARVR_PRODUCT_ID_4:
 			case GEARVR_PRODUCT_ID_5:
-				dock_type = CCIC_DOCK_HMT;
+				acc_type = CCIC_DOCK_HMT;
 				pr_info("%s : Samsung Gear VR connected.\n", __func__);
 #if defined(CONFIG_USB_HOST_NOTIFY) && defined(CONFIG_USB_HW_PARAM)
 				if (o_notify)
@@ -343,39 +358,50 @@ static int process_check_accessory(void * data)
 #endif
 				break;
 			case DEXDOCK_PRODUCT_ID:
-				dock_type = CCIC_DOCK_DEX;
+				acc_type = CCIC_DOCK_DEX;
 				pr_info("%s : Samsung DEX connected.\n", __func__);
 #if defined(CONFIG_USB_HOST_NOTIFY) && defined(CONFIG_USB_HW_PARAM)
 				if (o_notify)
 					inc_hw_param(o_notify, USB_CCIC_DEX_USE_COUNT);
 #endif
-
+				break;
+			case DEXPAD_PRODUCT_ID:
+				acc_type = CCIC_DOCK_DEXPAD;
+				pr_info("%s : Samsung DEX PADconnected.\n", __func__);
+#if defined(CONFIG_USB_HOST_NOTIFY) && defined(CONFIG_USB_HW_PARAM)
+				if (o_notify)
+					inc_hw_param(o_notify, USB_CCIC_DEX_USE_COUNT);
+#endif
 				break;
 			case HDMI_PRODUCT_ID:
-				dock_type = CCIC_DOCK_HDMI;
+				acc_type = CCIC_DOCK_HDMI;
 				pr_info("%s : Samsung HDMI connected.\n", __func__);
 				break;
 			default:
+				acc_type = CCIC_DOCK_NEW;
+				pr_info("%s : default device connected.\n", __func__);
 				break;
 			}
 		} else if (vid == SAMSUNG_MPA_VENDOR_ID) {
 			switch(pid) {
 			case MPA_PRODUCT_ID:
-				dock_type = CCIC_DOCK_MPA;
+				acc_type = CCIC_DOCK_MPA;
 				pr_info("%s : Samsung MPA connected.\n", __func__);
 				break;
 			default:
+				acc_type = CCIC_DOCK_NEW;
+				pr_info("%s : default device connected.\n", __func__);
 				break;
 			}
 		}
-	}
+		usbpd_data->acc_type = acc_type;
+	} else
+		acc_type = usbpd_data->acc_type;
 
-	if (dock_type)
-		ccic_send_dock_intent(dock_type);
-	else
-		dock_type = CCIC_DOCK_NEW;
-	usbpd_data->acc_type = dock_type;
-	ccic_send_dock_uevent(vid, pid, dock_type);
+	if (acc_type != CCIC_DOCK_NEW)
+		ccic_send_dock_intent(acc_type);
+
+	ccic_send_dock_uevent(vid, pid, acc_type);
 	return 1;
 }
 
@@ -424,9 +450,8 @@ static int process_discover_svids(void * data)
 	// Message Type Definition
 	U_VDO1_Type 				  *DATA_MSG_VDO1 = (U_VDO1_Type *)&ReadMSG[8];
 #if defined(CONFIG_USB_HOST_NOTIFY)
-	long timeleft = 0;
+	uint timeleft = 0;
 #endif
-
 	ret = s2mm005_read_byte(i2c, REG_ADD, ReadMSG, 32);
 	if (ret < 0) {
 		dev_err(&i2c->dev, "%s has i2c error.\n", __func__);
@@ -436,7 +461,7 @@ static int process_discover_svids(void * data)
 	usbpd_data->SVID_0 = DATA_MSG_VDO1->BITS.SVID_0;
 	usbpd_data->SVID_1 = DATA_MSG_VDO1->BITS.SVID_1;
 
-	if( usbpd_data->SVID_0 == TypeC_DP_SUPPORT ) {
+	if (usbpd_data->SVID_0 == TypeC_DP_SUPPORT) {
 		ccic_alt_noti.src = CCIC_NOTIFY_DEV_CCIC;
 		ccic_alt_noti.dest = CCIC_NOTIFY_DEV_DP;
 		ccic_alt_noti.id = CCIC_NOTIFY_ID_DP_CONNECT;
@@ -445,65 +470,36 @@ static int process_discover_svids(void * data)
 		ccic_alt_noti.sub3 = usbpd_data->Product_ID;
 
 #if defined(CONFIG_CCIC_ALTERNATE_MODE)
-		if (usbpd_data->is_host == HOST_ON) {
-			timeleft = wait_event_interruptible_timeout(usbpd_data->host_turn_on_wait_q,
-					usbpd_data->host_turn_on_event, (usbpd_data->host_turn_on_wait_time)*HZ);
-			dev_info(&i2c->dev, "%s host turn on wait = %ld \n", __func__, timeleft);
-			dev_info(&i2c->dev, "%s reinit suspend wait start\n", __func__);
-			reinit_completion(&usbpd_data->suspend_wait);
-			ccic_event_work(usbpd_data,
-					CCIC_NOTIFY_DEV_USB, CCIC_NOTIFY_ID_USB, 0/*attach*/, USB_STATUS_NOTIFY_DETACH/*drp*/, 0);
-			usbpd_data->is_host = HOST_OFF;
-			if(!dwc3_msm_is_suspended())
-			{
-				timeleft = wait_for_completion_interruptible_timeout(&usbpd_data->suspend_wait,
-							  msecs_to_jiffies(USB_PHY_SUSPEND_WAIT_MS));
-				dev_info(&i2c->dev, "%s suspend_wait timeleft = %ld \n", __func__, timeleft);
-			}
-		}
-		if (usbpd_data->is_host == HOST_OFF) {
-			ccic_event_work(usbpd_data,
-					CCIC_NOTIFY_DEV_MUIC, CCIC_NOTIFY_ID_ATTACH, 1/*attach*/, 1/*rprd*/,0);
-			usbpd_data->is_host = HOST_ON;
-			dev_info(&i2c->dev, "%s reinit resume wait start\n", __func__);
-			reinit_completion(&usbpd_data->resume_wait);
-			ccic_event_work(usbpd_data,
-					CCIC_NOTIFY_DEV_USB, CCIC_NOTIFY_ID_USB, 1/*attach*/, USB_STATUS_NOTIFY_ATTACH_DFP/*drp*/, 1/*high speed mode*/);
-			timeleft = wait_for_completion_interruptible_timeout(&usbpd_data->resume_wait,
-						  msecs_to_jiffies(USB_PHY_RESUME_WAIT_MS));
-			dev_info(&i2c->dev, "%s resume_wait timeleft = %ld \n", __func__, timeleft);
-		}
-		if (!dwc3_msm_is_host_highspeed() && usbpd_data->host_turn_on_event) {
-			dev_info(&i2c->dev, "%s dp is ready but usb phy isn't high speed! Stop the displary port! \n", __func__);
-			return -1;
-		}
-
+		timeleft = wait_event_interruptible_timeout(usbpd_data->host_turn_on_wait_q,
+						!usbpd_data->detach_done_wait, (usbpd_data->host_turn_on_wait_time)*HZ);
+		dev_info(&i2c->dev, "%s detach_done_wait = %d\n", __func__, timeleft);
 		usbpd_data->dp_is_connect = 1;
-		/*
-		 * If you want to support USB SuperSpeed when you connect
+		
+		/* If you want to support USB SuperSpeed when you connect
 		 * Display port dongle, You should change dp_hs_connect depend
 		 * on Pin assignment.If DP use 4lane(Pin Assignment C,E,A),
-		 * dp_hs_connect is 1. USB can support HS.If DP use 2lane(Pin Assigment B,D,F), dp_hs_connect is 0. USB
+		 * dp_hs_connect is 1. USB can support HS.
+		 * If DP use 2lane(Pin Assigment B,D,F),dp_hs_connect is 0. USB
 		 * can support SS
 		 */
 		 usbpd_data->dp_hs_connect = 1;
+#if defined(CONFIG_USB_HOST_NOTIFY) && defined(CONFIG_USB_HW_PARAM)
+		if (o_notify)			
+			inc_hw_param(o_notify, USB_CCIC_DP_USE_COUNT);
+#endif
+		
+		timeleft = wait_event_interruptible_timeout(usbpd_data->host_turn_on_wait_q,
+						usbpd_data->host_turn_on_event, (usbpd_data->host_turn_on_wait_time)*HZ);
+		dev_info(&i2c->dev, "%s host turn on wait = %d \n", __func__, timeleft);
 #endif
 		ccic_event_work(usbpd_data,ccic_alt_noti.dest,ccic_alt_noti.id,
 			ccic_alt_noti.sub1,ccic_alt_noti.sub2,ccic_alt_noti.sub3);
-
-#if defined(CONFIG_USB_HW_PARAM)
-	if (usbpd_data->SVID_0 == DISPLAY_PORT_SVID && o_notify)
-		inc_hw_param(o_notify, USB_CCIC_DP_USE_COUNT);
-#endif
-
-		ccic_event_work(usbpd_data, CCIC_NOTIFY_DEV_USB_DP,
-			CCIC_NOTIFY_ID_USB_DP, usbpd_data->dp_is_connect,
-			usbpd_data->dp_hs_connect, 0);
+		ccic_event_work(usbpd_data,
+				CCIC_NOTIFY_DEV_USB_DP, CCIC_NOTIFY_ID_USB_DP,
+				usbpd_data->dp_is_connect /*attach*/, usbpd_data->dp_hs_connect, 0);
 	}
 
 	dev_info(&i2c->dev, "%s SVID_0 : 0x%X, SVID_1 : 0x%X\n", __func__, usbpd_data->SVID_0, usbpd_data->SVID_1);
-
-
 	return 0;
 }
 
@@ -527,9 +523,9 @@ static int process_discover_modes(void * data)
 	dev_info(&i2c->dev, "%s : vendor_id = 0x%04x , svid_1 = 0x%04x\n", __func__,DATA_MSG_VDM->BITS.Standard_Vendor_ID,usbpd_data->SVID_1);
 	if(DATA_MSG_VDM->BITS.Standard_Vendor_ID == TypeC_DP_SUPPORT && usbpd_data->SVID_0 == TypeC_DP_SUPPORT) {
 		//  pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.BITS.
-		dev_info(&i2c->dev, "pDP_DIS_MODE->MSG_HEADER.DATA = 0x%08X\n", pDP_DIS_MODE->MSG_HEADER.DATA);
-		dev_info(&i2c->dev, "pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA = 0x%08X\n", pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA);
-		dev_info(&i2c->dev, "pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA = 0x%08X\n", pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA);
+		dev_info(&i2c->dev,"pDP_DIS_MODE->MSG_HEADER.DATA = 0x%08X\n\r",pDP_DIS_MODE->MSG_HEADER.DATA);
+		dev_info(&i2c->dev,"pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA = 0x%08X\n\r",pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA);
+		dev_info(&i2c->dev,"pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA = 0x%08X\n\r",pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA);
 
 		if(pDP_DIS_MODE->MSG_HEADER.BITS.Number_of_obj > 1) {
 			if( ( (pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.BITS.Port_Capability == num_UFP_D_Capable)
@@ -566,12 +562,12 @@ static int process_discover_modes(void * data)
 		}
 	}
 
-	if(DATA_MSG_VDM->BITS.Standard_Vendor_ID == TypeC_Dex_SUPPORT && usbpd_data->SVID_1 == TypeC_Dex_SUPPORT) {
+	if (DATA_MSG_VDM->BITS.Standard_Vendor_ID == TypeC_Dex_SUPPORT && usbpd_data->SVID_1 == TypeC_SAMSUNG_SVID) {
 		dev_info(&i2c->dev, "%s : dex mode discover_mode ack status!\n", __func__);
 		//  pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.BITS.
-		dev_info(&i2c->dev, "pDP_DIS_MODE->MSG_HEADER.DATA = 0x%08X\n", pDP_DIS_MODE->MSG_HEADER.DATA);
-		dev_info(&i2c->dev, "pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA = 0x%08X\n", pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA);
-		dev_info(&i2c->dev, "pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA = 0x%08X\n", pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA);
+		dev_info(&i2c->dev,"pDP_DIS_MODE->MSG_HEADER.DATA = 0x%08X\n\r",pDP_DIS_MODE->MSG_HEADER.DATA);
+		dev_info(&i2c->dev,"pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA = 0x%08X\n\r",pDP_DIS_MODE->DATA_MSG_VDM_HEADER.DATA);
+		dev_info(&i2c->dev,"pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA = 0x%08X\n\r",pDP_DIS_MODE->DATA_MSG_MODE_VDO_DP.DATA);		
 
 		REG_ADD = REG_I2C_SLV_CMD;
 		W_DATA[0] = MODE_INTERFACE;	/* Mode Interface */
@@ -613,7 +609,7 @@ static int process_enter_mode(void * data)
 
 	if (DATA_MSG_VDM->BITS.VDM_command_type == 1) {
 		dev_info(&i2c->dev, "%s : EnterMode ACK.\n", __func__);
-		if(DATA_MSG_VDM->BITS.Standard_Vendor_ID == TypeC_Dex_SUPPORT && usbpd_data->SVID_1 == TypeC_Dex_SUPPORT) {
+		if (DATA_MSG_VDM->BITS.Standard_Vendor_ID == TypeC_Dex_SUPPORT) {
 			usbpd_data->is_samsung_accessory_enter_mode = 1;
 			dev_info(&i2c->dev, "%s : dex mode enter_mode ack status!\n", __func__);
 		}
@@ -675,6 +671,7 @@ static int process_attention(void * data)
 					pr_info("wrong pin assignment value\n");
 				}
 			} else {
+				dwc3_restart_usb_host_mode_hs();
 				if(usbpd_data->pin_assignment & DP_PIN_ASSIGNMENT_C) {
 					W_DATA[2] =DP_PIN_ASSIGNMENT_C;
 					ccic_alt_noti.sub1 = CCIC_NOTIFY_DP_PIN_C;
@@ -801,6 +798,7 @@ static int process_dp_status_update(void *data)
 						pr_info("wrong pin assignment value\n");
 					}
 				} else {
+					dwc3_restart_usb_host_mode_hs();
 					if(usbpd_data->pin_assignment & DP_PIN_ASSIGNMENT_C) {
 						W_DATA[2] =DP_PIN_ASSIGNMENT_C;
 						ccic_alt_noti.sub1 = CCIC_NOTIFY_DP_PIN_C;
@@ -902,7 +900,7 @@ static int process_dp_configure(void *data)
 			ccic_alt_noti.sub1,ccic_alt_noti.sub2,ccic_alt_noti.sub3);
 	}
 
-	if(DATA_MSG_VDM->BITS.Standard_Vendor_ID == TypeC_DP_SUPPORT && usbpd_data->SVID_1 == TypeC_Dex_SUPPORT){
+	if (DATA_MSG_VDM->BITS.Standard_Vendor_ID == TypeC_DP_SUPPORT && usbpd_data->SVID_1 == TypeC_SAMSUNG_SVID) {
 		/* write s2mm005 with TypeC_Dex_SUPPORT SVID */
 		/* It will start discover mode with that svid */
 		dev_info(&i2c->dev, "%s : svid1 is dex station\n", __func__);
@@ -930,12 +928,10 @@ static void process_alternate_mode(void * data)
 	struct otg_notify *o_notify = get_otg_notify();
 	if (mode) {
 		dev_info(&i2c->dev, "%s, mode : 0x%x\n", __func__, mode);
-#if defined(CONFIG_USB_HOST_NOTIFY)
 		if (o_notify != NULL && is_blocked(o_notify, NOTIFY_BLOCK_TYPE_HOST)) {
 			dev_info(&i2c->dev, "%s, host is blocked, skip all the alternate mode.\n", __func__);
 			goto process_error;
 		}
-#endif
 		if (mode & VDM_DISCOVER_ID)
 			ret = process_discover_identity(usbpd_data);
 		if(ret)
@@ -1018,7 +1014,332 @@ void receive_alternate_message(void * data, VDM_MSG_IRQ_STATUS_Type *VDM_MSG_IRQ
 	process_alternate_mode(usbpd_data);
 }
 
-int send_samsung_unstructured_vdm_message(void * data, const char *buf, size_t size)
+void set_endian(char *src, char *dest, int size)
+{
+	int i, j;
+	int loop;
+	int dest_pos;
+	int src_pos;
+
+	loop = size / SAMSUNGUVDM_ALIGN;
+	loop += (((size % SAMSUNGUVDM_ALIGN) > 0) ? 1:0);
+
+	for (i = 0 ; i < loop ; i++)
+		for (j = 0 ; j < SAMSUNGUVDM_ALIGN ; j++) {
+			src_pos = SAMSUNGUVDM_ALIGN * i + j;
+			dest_pos = SAMSUNGUVDM_ALIGN * i + SAMSUNGUVDM_ALIGN - j - 1;
+			dest[dest_pos] = src[src_pos];
+		}
+}
+
+int get_checksum(char *data, int start_addr, int size)
+{
+	int checksum = 0;
+	int i;
+
+	for (i = 0; i < size; i++) {
+		checksum += data[start_addr+i];
+		printk("%x ", (uint32_t)data[start_addr+i]);
+	}
+	printk(" %s \n", __func__);
+	return checksum;
+}
+
+int set_uvdmset_count(int size)
+{
+	int ret = 0;
+
+	if (size <= SAMSUNGUVDM_MAXDATA_FIRST_UVDMSET)
+		ret = 1;
+	else {
+		ret = ((size-SAMSUNGUVDM_MAXDATA_FIRST_UVDMSET) / SAMSUNGUVDM_MAXDATA_NORMAL_UVDMSET);
+		if (((size-SAMSUNGUVDM_MAXDATA_FIRST_UVDMSET) % SAMSUNGUVDM_MAXDATA_NORMAL_UVDMSET) == 0)
+			ret += 1;
+		else
+			ret += 2;
+	}
+	return ret;
+}
+
+void set_msghedader(void *data, int msg_type, int obj_num)
+{
+	MSG_HEADER_Type *MSG_HDR;
+	uint8_t *SendMSG = (uint8_t *)data;
+
+	MSG_HDR = (MSG_HEADER_Type *)&SendMSG[0];
+	MSG_HDR->Message_Type = msg_type;
+	MSG_HDR->Number_of_obj = obj_num;
+	return;
+}
+int get_writesize(void *data)
+{
+	MSG_HEADER_Type *MSG_HDR;
+	uint8_t *SendMSG = (uint8_t *)data;
+
+	MSG_HDR = (MSG_HEADER_Type *)&SendMSG[0];
+	return ((MSG_HDR->Number_of_obj)*4+4);
+}
+
+void set_uvdmheader(void *data, int vendor_id, int vdm_type)
+{
+	U_UNSTRUCTURED_VDM_HEADER_Type	*UVDM_HEADER;
+	U_DATA_MSG_VDM_HEADER_Type *VDM_HEADER;
+	uint8_t *SendMSG = (uint8_t *)data;
+
+	UVDM_HEADER = (U_UNSTRUCTURED_VDM_HEADER_Type *)&SendMSG[4];
+	UVDM_HEADER->BITS.USB_Vendor_ID = vendor_id;
+	UVDM_HEADER->BITS.VDM_TYPE = vdm_type;
+	UVDM_HEADER->BITS.VENDOR_DEFINED_MESSAGE = SEC_UVDM_UNSTRUCTURED_VDM;
+	VDM_HEADER = (U_DATA_MSG_VDM_HEADER_Type *)&SendMSG[4];
+	VDM_HEADER->BITS.VDM_command = 4; //s2mm005 only
+	return;
+}
+
+void set_sec_uvdmheader(void *data, int pid, bool data_type, int cmd_type,
+		bool dir, int total_uvdmset_num, uint8_t received_data)
+{
+	U_SEC_UVDM_HEADER *SEC_VDM_HEADER;
+	uint8_t *SendMSG = (uint8_t *)data;
+
+	SEC_VDM_HEADER = (U_SEC_UVDM_HEADER *)&SendMSG[8];
+	SEC_VDM_HEADER->BITS.pid = pid;
+	SEC_VDM_HEADER->BITS.data_type = data_type;
+	SEC_VDM_HEADER->BITS.command_type = cmd_type;
+	SEC_VDM_HEADER->BITS.direction = dir;
+	if (dir == DIR_OUT)
+		SEC_VDM_HEADER->BITS.total_number_of_uvdm_set = total_uvdmset_num;
+	if (data_type == TYPE_SHORT)
+		SEC_VDM_HEADER->BITS.data = received_data;
+
+	pr_info("%s pid = %d  data_type=%d ,cmd_type =%d,direction= %d, total_num_of_uvdm_set = %d\n",
+		 __func__, SEC_VDM_HEADER->BITS.pid,
+		SEC_VDM_HEADER->BITS.data_type,
+		SEC_VDM_HEADER->BITS.command_type,
+		SEC_VDM_HEADER->BITS.direction,
+		SEC_VDM_HEADER->BITS.total_number_of_uvdm_set);
+	return;
+}
+
+int get_datasize_of_currentset (int first_set, int remained_data_size)
+{
+	int ret = 0;
+
+	if (first_set)
+		ret = (remained_data_size <= SAMSUNGUVDM_MAXDATA_FIRST_UVDMSET) ? \
+			remained_data_size : SAMSUNGUVDM_MAXDATA_FIRST_UVDMSET;
+	 else
+		ret = (remained_data_size <= SAMSUNGUVDM_MAXDATA_NORMAL_UVDMSET) ? \
+			remained_data_size : SAMSUNGUVDM_MAXDATA_NORMAL_UVDMSET;
+
+	 return ret;
+}
+
+void set_sec_uvdm_txdataheader (void *data, int first_set, int cur_uvdmset,
+		int total_data_size, int remained_data_size)
+{
+	U_SEC_TX_DATA_HEADER *SEC_TX_DATA_HEADER;
+	uint8_t *SendMSG = (uint8_t *)data;
+
+	if (first_set)
+		SEC_TX_DATA_HEADER = (U_SEC_TX_DATA_HEADER *)&SendMSG[12];
+	else
+		SEC_TX_DATA_HEADER = (U_SEC_TX_DATA_HEADER *)&SendMSG[8];
+
+	SEC_TX_DATA_HEADER->BITS.data_size_of_current_set =\
+		get_datasize_of_currentset(first_set, remained_data_size);
+	SEC_TX_DATA_HEADER->BITS.total_data_size = total_data_size;
+	SEC_TX_DATA_HEADER->BITS.order_of_current_uvdm_set = cur_uvdmset;
+
+	return;
+}
+
+void set_sec_uvdm_txdata_tailer(void *data)
+{
+	U_SEC_TX_DATA_TAILER *SEC_TX_DATA_TAILER;
+	uint8_t *SendMSG = (uint8_t *)data;
+
+	SEC_TX_DATA_TAILER = (U_SEC_TX_DATA_TAILER *)&SendMSG[28];
+	SEC_TX_DATA_TAILER->BITS.checksum = get_checksum(SendMSG, S2MM005_SECUVDM_START_ADDR,\
+			SAMSUNGUVDM_CHECKSUM_DATA_COUNT);
+	return;
+}
+
+void set_sec_uvdm_rxdata_header(void *data, int cur_uvdmset_num, int cur_uvdmset_data, int ack)
+{
+	U_SEC_RX_DATA_HEADER *SEC_UVDM_RX_HEADER;
+	uint8_t *SendMSG = (uint8_t *)data;
+
+	SEC_UVDM_RX_HEADER = (U_SEC_RX_DATA_HEADER *)&SendMSG[8];
+	SEC_UVDM_RX_HEADER->BITS.order_of_current_uvdm_set = cur_uvdmset_num;
+	SEC_UVDM_RX_HEADER->BITS.received_data_size_of_current_set = cur_uvdmset_data;
+	SEC_UVDM_RX_HEADER->BITS.result_value = ack;
+
+}
+
+ssize_t send_samsung_unstructured_long_uvdm_message(void *data, void *buf, size_t size)
+{
+	struct s2mm005_data *usbpd_data = data;
+	struct i2c_client *i2c = usbpd_data->i2c;
+	uint16_t REG_ADD = REG_SSM_MSG_SEND;
+	uint8_t SendMSG[32] = {0,};
+	u8 W_DATA[2];
+	uint8_t *SEC_DATA;
+
+	/* Valuable to calc the uvdm set and each uvdm set's data size*/
+	int need_uvdmset_count = 0;
+	int cur_uvdmset_data = 0;
+	int cur_uvdmset_num = 0;
+	int accumulated_data_size = 0;
+	int remained_data_size = 0;
+	uint8_t received_data[MAX_INPUT_DATA] = {0,};
+	int time_left;
+	int i;
+	int received_data_index;
+	int write_size = 0;
+
+	/* 1. Calc the receivced data size and determin the uvdm set count and last data of uvdm set. */
+	set_endian(buf, received_data, size);
+
+	need_uvdmset_count = set_uvdmset_count(size);
+	dev_info(&i2c->dev, "%s need_uvdmset_count = %d \n", __func__, need_uvdmset_count);
+
+	usbpd_data->is_in_first_sec_uvdm_req = true;
+	usbpd_data->is_in_sec_uvdm_out = DIR_OUT;
+	cur_uvdmset_num = 1;
+	accumulated_data_size = 0;
+	remained_data_size = size;
+	received_data_index = 0;
+
+	/* 2. Common : Fill the MSGHeader */
+	set_msghedader(SendMSG, 15, 7);
+	/* 3. Common : Fill the UVDMHeader*/
+	set_uvdmheader(SendMSG, SAMSUNG_VENDOR_ID, 0);
+	/* 4. Common : Fill the First SEC_VDMHeader*/
+	if (usbpd_data->is_in_first_sec_uvdm_req)
+		set_sec_uvdmheader(SendMSG, usbpd_data->Product_ID, TYPE_LONG,\
+				SEC_UVDM_ININIATOR, DIR_OUT, need_uvdmset_count, 0);
+
+	while (cur_uvdmset_num <= need_uvdmset_count) {
+		cur_uvdmset_data = 0;
+		time_left = 0;
+
+		set_sec_uvdm_txdataheader(SendMSG, usbpd_data->is_in_first_sec_uvdm_req,\
+				cur_uvdmset_num, size, remained_data_size);
+
+		cur_uvdmset_data = get_datasize_of_currentset(usbpd_data->is_in_first_sec_uvdm_req, remained_data_size);
+
+		dev_info(&i2c->dev, "%s data_size_of_current_set = %d ,total_data_size = %ld,\
+			order_of_current_uvdm_set = %d\n", __func__, cur_uvdmset_data, size, cur_uvdmset_num);
+		/* 6. Common : Fill the DATA */
+		if (usbpd_data->is_in_first_sec_uvdm_req) {
+			SEC_DATA = (uint8_t *)&SendMSG[S2MM005_SECUVDM_START_ADDR+8];
+			for (i = 0; i < SAMSUNGUVDM_MAXDATA_FIRST_UVDMSET; i++)
+				SEC_DATA[i] = received_data[received_data_index++];
+		} else {
+			SEC_DATA = (uint8_t *)&SendMSG[S2MM005_SECUVDM_START_ADDR+4];
+			for (i = 0; i < SAMSUNGUVDM_MAXDATA_NORMAL_UVDMSET; i++)
+				SEC_DATA[i] = received_data[received_data_index++];
+		}
+
+		/* 7. Common : Fill the TX_DATA_Tailer */
+		set_sec_uvdm_txdata_tailer(SendMSG);
+
+		/* 8. Send data to PDIC */
+		REG_ADD = REG_SSM_MSG_SEND;
+		write_size = get_writesize(SendMSG);
+		s2mm005_write_byte(i2c, REG_ADD, SendMSG, write_size);
+		REG_ADD = REG_I2C_SLV_CMD;
+		W_DATA[0] = MODE_INTERFACE;
+		W_DATA[1] = SEL_SSM_MSG_REQ;
+		s2mm005_write_byte(i2c, REG_ADD, &W_DATA[0], 2);
+
+		/* 9. Wait Response*/
+		reinit_completion(&usbpd_data->uvdm_out_wait);
+		time_left =
+			wait_for_completion_interruptible_timeout(&usbpd_data->uvdm_out_wait,
+							  msecs_to_jiffies(SASMSUNGUVDM_WAIT_MS));
+		if (time_left <= 0)
+			return -ETIME;
+
+		accumulated_data_size += cur_uvdmset_data;
+		remained_data_size -= cur_uvdmset_data;
+		if (usbpd_data->is_in_first_sec_uvdm_req)
+			usbpd_data->is_in_first_sec_uvdm_req = false;
+		cur_uvdmset_num++;
+	}
+
+	return size;
+}
+
+int check_is_wait_ack_accessroy(int vid, int pid, int svid)
+{
+	int should_wait = true;
+	if (vid == SAMSUNG_VENDOR_ID && pid == DEXDOCK_PRODUCT_ID && svid == TypeC_DP_SUPPORT) {
+		pr_info("%s : no need to wait ack response!\n", __func__);
+		should_wait = false;
+	}
+	return should_wait;
+}
+
+int send_samsung_unstructured_short_vdm_message(void *data, void *buf, size_t size)
+{
+	struct s2mm005_data *usbpd_data = data;
+	struct i2c_client *i2c = usbpd_data->i2c;
+	uint16_t REG_ADD = REG_SSM_MSG_SEND;
+	uint8_t SendMSG[32] = {0,};
+	u8 W_DATA[2];
+	/* Message Type Definition */
+	uint8_t received_data = 0;
+	int time_left;
+
+	if ((buf == NULL) || size <= 0) {
+		dev_info(&i2c->dev, "%s given data is not valid !\n", __func__);
+		return -EINVAL;
+	}
+
+	if (!usbpd_data->is_samsung_accessory_enter_mode) {
+		dev_info(&i2c->dev, "%s - samsung_accessory mode is not ready!\n", __func__);
+		return -ENXIO;
+	}
+
+	/* 1. Calc the receivced data size and determin the uvdm set count and last data of uvdm set. */
+	received_data = *(char *)buf;
+	/* 2. Common : Fill the MSGHeader */
+	set_msghedader(SendMSG, 15, 2);
+	/* 3. Common : Fill the UVDMHeader*/
+	set_uvdmheader(SendMSG, SAMSUNG_VENDOR_ID, 0);
+	/* 4. Common : Fill the First SEC_VDMHeader*/
+	set_sec_uvdmheader(SendMSG, usbpd_data->Product_ID, TYPE_SHORT,\
+				SEC_UVDM_ININIATOR, DIR_OUT, 1, received_data);
+	usbpd_data->is_in_first_sec_uvdm_req = true;
+
+	dev_info(&i2c->dev, "%s - process short data!\n", __func__);
+	s2mm005_write_byte(i2c, REG_ADD, SendMSG, 32);
+
+	/* send uVDM message */
+	REG_ADD = REG_I2C_SLV_CMD;
+	W_DATA[0] = MODE_INTERFACE;
+	W_DATA[1] = SEL_SSM_MSG_REQ;
+	s2mm005_write_byte(i2c, REG_ADD, &W_DATA[0], 2);
+
+	if (check_is_wait_ack_accessroy(usbpd_data->Vendor_ID, usbpd_data->Product_ID, usbpd_data->SVID_0)) {
+		reinit_completion(&usbpd_data->uvdm_out_wait);
+		/* Wait Response*/
+		time_left =
+			wait_for_completion_interruptible_timeout(&usbpd_data->uvdm_out_wait,
+							  msecs_to_jiffies(SASMSUNGUVDM_WAIT_MS));
+		if (time_left <= 0) {
+			usbpd_data->is_in_first_sec_uvdm_req = false;
+			return -ETIME;
+		}
+	}
+
+	dev_info(&i2c->dev, "%s - exit : short data transfer complete!\n", __func__);
+	usbpd_data->is_in_first_sec_uvdm_req = false;
+	return size;
+}
+
+int send_samsung_unstructured_vdm_message(void *data, const char *buf, size_t size)
 {
 	struct s2mm005_data *usbpd_data = data;
 	struct i2c_client *i2c = usbpd_data->i2c;
@@ -1177,19 +1498,259 @@ void receive_unstructured_vdm_message(void * data, SSM_MSG_IRQ_STATUS_Type *SSM_
 	uint16_t REG_ADD = REG_SSM_MSG_READ;
 	uint8_t ReadMSG[32] = {0,};
 	u8 W_DATA[1];
+	U_SEC_UVDM_RESPONSE_HEADER *SEC_UVDM_RESPONSE_HEADER;
+	U_SEC_RX_DATA_HEADER *SEC_UVDM_RX_HEADER;
+
+	if (usbpd_data->is_in_sec_uvdm_out == DIR_OUT) {
+		s2mm005_read_byte(i2c, REG_ADD, ReadMSG, 16);
+		/* first uvdm req for direction out */
+		if (usbpd_data->is_in_first_sec_uvdm_req) {
+			SEC_UVDM_RESPONSE_HEADER = (U_SEC_UVDM_RESPONSE_HEADER *)&ReadMSG[8];
+			if (SEC_UVDM_RESPONSE_HEADER->BITS.data_type == TYPE_LONG) {
+				if (SEC_UVDM_RESPONSE_HEADER->BITS.command_type == SEC_UVDM_RESPONDER_ACK) {
+					SEC_UVDM_RX_HEADER = (U_SEC_RX_DATA_HEADER *)&ReadMSG[12];
+					if (SEC_UVDM_RX_HEADER->BITS.result_value != SEC_UVDM_RESPONDER_ACK) {
+						dev_err(&i2c->dev, "%s Busy or Nak received.\n", __func__);
+					}
+				} else {
+					dev_err(&i2c->dev, "%s Response type is wrong.\n", __func__);
+				}
+			} else {
+				if (SEC_UVDM_RESPONSE_HEADER->BITS.command_type == SEC_UVDM_RESPONDER_ACK)
+					dev_info(&i2c->dev, "%s Short packet ack is received\n", __func__);
+				else {
+					dev_err(&i2c->dev, "%s Short packet Response type is wrong.\n", __func__);
+				}
+			}
+		/* uvdm req for direction out */
+		} else {
+			SEC_UVDM_RX_HEADER = (U_SEC_RX_DATA_HEADER *)&ReadMSG[8];
+			if (SEC_UVDM_RX_HEADER->BITS.result_value != SEC_UVDM_RESPONDER_ACK) {
+					dev_err(&i2c->dev, "%s Busy or Nak received.\n", __func__);
+			}
+		}
+		REG_ADD = REG_I2C_SLV_CMD;
+		W_DATA[0] = MODE_INT_CLEAR;
+		s2mm005_write_byte(i2c, REG_ADD, &W_DATA[0], 1);
+		complete(&usbpd_data->uvdm_out_wait);
+	/* In uvdm req */
+	} else {
+		s2mm005_read_byte(i2c, REG_ADD, ReadMSG, 32);
+		/* first uvdm req for direction in */
+		if (usbpd_data->is_in_first_sec_uvdm_req) {
+			SEC_UVDM_RESPONSE_HEADER = (U_SEC_UVDM_RESPONSE_HEADER *)&ReadMSG[8];
+			dev_info(&i2c->dev, "[jj time]%s : data_type = %d , command_type = %d, direction=%d \n", __func__,
+				SEC_UVDM_RESPONSE_HEADER->BITS.data_type,
+				SEC_UVDM_RESPONSE_HEADER->BITS.command_type,
+				SEC_UVDM_RESPONSE_HEADER->BITS.direction);
+			/* for long data */
+			if (SEC_UVDM_RESPONSE_HEADER->BITS.command_type != SEC_UVDM_RESPONDER_ACK) {
+				dev_info(&i2c->dev, "%s :received nak or busy in response  \n", __func__);
+				return;
+			}
+		}
+		complete(&usbpd_data->uvdm_longpacket_in_wait);
+	}
+}
+
+int samsung_uvdm_ready(void)
+{
+	int uvdm_ready = false;
+	struct s2mm005_data *usbpd_data;
+	usbpd_data = g_usbpd_data;
+
+	if (usbpd_data->is_samsung_accessory_enter_mode)
+		uvdm_ready =  true;
+
+	pr_info("%s : uvdm ready=%d!\n", __func__, uvdm_ready);
+	return uvdm_ready;
+}
+
+void samsung_uvdm_close(void)
+{
+	struct s2mm005_data *usbpd_data;
+	pr_info("%s + samsung_uvdm_close success\n", __func__);
+	usbpd_data = g_usbpd_data;
+	complete(&usbpd_data->uvdm_out_wait);
+	complete(&usbpd_data->uvdm_longpacket_in_wait);
+	pr_info("%s - samsung_uvdm_close success\n", __func__);
+}
+
+int samsung_uvdm_out_request_message(void *data, int size)
+{
+	struct s2mm005_data *usbpd_data;
+	struct i2c_client *i2c;
+	ssize_t ret;
+	usbpd_data = g_usbpd_data;
+
+	if (!usbpd_data)
+		return -ENXIO;
+
+	i2c = usbpd_data->i2c;
+	if (i2c == NULL) {
+		dev_err(&i2c->dev, "%s usbpd_data->i2c is not valid!\n", __func__);
+		return -EINVAL;
+	}
+
+	if (data == NULL) {
+		dev_err(&i2c->dev, "%s given data is not valid !\n", __func__);
+		return -EINVAL;
+	}
+
+	if (size >= SAMSUNGUVDM_MAX_LONGPACKET_SIZE) {
+		dev_err(&i2c->dev, "%s : size %ld is too big to send data\n", __func__, size);
+		ret = -EFBIG;
+	} else if (size <= SAMSUNGUVDM_MAX_SHORTPACKET_SIZE)
+		ret = send_samsung_unstructured_short_vdm_message(usbpd_data, data, size);
+	else
+		ret = send_samsung_unstructured_long_uvdm_message(usbpd_data, data, size);
+
+	return ret;
+}
+
+int samsung_uvdm_in_request_message(void *data)
+{
+	struct s2mm005_data *usbpd_data;
+	struct i2c_client *i2c;
+	uint16_t REG_ADD = REG_SSM_MSG_SEND;
+	uint8_t SendMSG[32] = {0,};
+	uint8_t ReadMSG[32] = {0,};
+	u8 W_DATA[2];
+	uint8_t IN_DATA[MAX_INPUT_DATA] = {0, };
+
+	/* Send Request */
+	/* 1  Message Type Definition */
+	U_SEC_UVDM_RESPONSE_HEADER	*SEC_RES_HEADER;
+	U_SEC_TX_DATA_HEADER		*SEC_UVDM_TX_HEADER;
+	U_SEC_TX_DATA_TAILER		*SEC_UVDM_TX_TAILER;
+
+	int cur_uvdmset_data = 0;
+	int cur_uvdmset_num = 0;
+	int total_uvdmset_num = 0;
+	int received_data_size = 0;
+	int total_received_data_size = 0;
+	int ack = 0;
+	int size = 0;
+	int time_left = 0;
 	int i;
 
-	uint16_t *VID = (uint16_t *)&ReadMSG[6];
-	VDO_MESSAGE_Type *VDO_MSG = (VDO_MESSAGE_Type *)&ReadMSG[8];
+	int write_size = 0;
+	int cal_checksum = 0;
+	usbpd_data = g_usbpd_data;
 
+	if (!usbpd_data)
+		return -ENXIO;
+
+	i2c = usbpd_data->i2c;
+	if (i2c == NULL) {
+		dev_err(&i2c->dev, "%s usbpd_data->i2c is not valid!\n", __func__);
+		return -EINVAL;
+	}
+
+	dev_info(&i2c->dev, "%s\n", __func__);
+	usbpd_data->is_in_sec_uvdm_out = DIR_IN;
+	usbpd_data->is_in_first_sec_uvdm_req = true;
+
+	/* 2. Common : Fill the MSGHeader */
+	set_msghedader(SendMSG, 15, 2);
+	/* 3. Common : Fill the UVDMHeader*/
+	set_uvdmheader(SendMSG, SAMSUNG_VENDOR_ID, 0);
+
+	/* 4. Common : Fill the First SEC_VDMHeader*/
+	if (usbpd_data->is_in_first_sec_uvdm_req)
+		set_sec_uvdmheader(SendMSG, usbpd_data->Product_ID, TYPE_LONG,\
+				SEC_UVDM_ININIATOR, DIR_IN, 0, 0);
+
+	/* 5. Send data to PDIC */
+	write_size = get_writesize(SendMSG);
+	s2mm005_write_byte(usbpd_data->i2c, REG_ADD, SendMSG, write_size);
+
+	REG_ADD = REG_I2C_SLV_CMD;
+	W_DATA[0] = MODE_INTERFACE;
+	W_DATA[1] = SEL_SSM_MSG_REQ;
+	s2mm005_write_byte(i2c, REG_ADD, &W_DATA[0], 2);
+
+	cur_uvdmset_num = 0;
+	total_uvdmset_num = 1;
+
+	do {
+		reinit_completion(&usbpd_data->uvdm_longpacket_in_wait);
+		time_left =
+			wait_for_completion_interruptible_timeout(&usbpd_data->uvdm_longpacket_in_wait,
+					msecs_to_jiffies(SASMSUNGUVDM_WAIT_MS));
+		if (time_left <= 0) {
+			dev_err(&i2c->dev, "%s timeout\n", __func__);
+			return -ETIME;
+		}
+
+		/* read data */
+		REG_ADD = REG_SSM_MSG_READ;
 	s2mm005_read_byte(i2c, REG_ADD, ReadMSG, 32);
-	dev_info(&i2c->dev, "%s : VID : 0x%x\n", __func__, *VID);
-	for(i=0;i<6;i++)
-		dev_info(&i2c->dev, "%s : VDO_%d : %d\n", __func__, i+1, VDO_MSG->VDO[i]);
 
+		if (usbpd_data->is_in_first_sec_uvdm_req) {
+			SEC_RES_HEADER = (U_SEC_UVDM_RESPONSE_HEADER *)&ReadMSG[8];
+			SEC_UVDM_TX_HEADER = (U_SEC_TX_DATA_HEADER *)&ReadMSG[12];
+
+			if (SEC_RES_HEADER->BITS.data_type == TYPE_SHORT) {
+				IN_DATA[received_data_size++] = SEC_RES_HEADER->BITS.data;
+				return received_data_size;
+			} else {
+				/* 1. check the data size received */
+				size = SEC_UVDM_TX_HEADER->BITS.total_data_size;
+				cur_uvdmset_data = SEC_UVDM_TX_HEADER->BITS.data_size_of_current_set;
+				cur_uvdmset_num = SEC_UVDM_TX_HEADER->BITS.order_of_current_uvdm_set;
+				total_uvdmset_num =
+					SEC_RES_HEADER->BITS.total_number_of_uvdm_set;
+
+				usbpd_data->is_in_first_sec_uvdm_req = false;
+				/* 2. copy data to buffer */
+				for (i = 0; i < SAMSUNGUVDM_MAXDATA_FIRST_UVDMSET; i++)
+					IN_DATA[received_data_size++] = ReadMSG[16+i];
+
+				total_received_data_size += cur_uvdmset_data;
+				usbpd_data->is_in_first_sec_uvdm_req = false;
+			}
+		} else {
+			SEC_UVDM_TX_HEADER = (U_SEC_TX_DATA_HEADER *)&ReadMSG[8];
+			cur_uvdmset_data = SEC_UVDM_TX_HEADER->BITS.data_size_of_current_set;
+			cur_uvdmset_num = SEC_UVDM_TX_HEADER->BITS.order_of_current_uvdm_set;
+			/* 2. copy data to buffer */
+			for (i = 0 ; i < SAMSUNGUVDM_MAXDATA_NORMAL_UVDMSET ; i++)
+				IN_DATA[received_data_size++] = ReadMSG[12+i];
+			total_received_data_size += cur_uvdmset_data;
+		}
+		/* 3. Check Checksum */
+		SEC_UVDM_TX_TAILER = (U_SEC_TX_DATA_TAILER *)&ReadMSG[28];
+		cal_checksum = get_checksum(ReadMSG, 8, SAMSUNGUVDM_CHECKSUM_DATA_COUNT);
+		ack = (cal_checksum == SEC_UVDM_TX_TAILER->BITS.checksum) ?
+			SEC_UVDM_RX_HEADER_ACK : SEC_UVDM_RX_HEADER_NAK;
+
+		///* 4. clear IRQ */
 	REG_ADD = REG_I2C_SLV_CMD;
 	W_DATA[0] = MODE_INT_CLEAR;
 	s2mm005_write_byte(i2c, REG_ADD, &W_DATA[0], 1);
+		/* 5. Send Ack */
+		/* 5-1. Common : Fill the MSGHeader */
+		set_msghedader(SendMSG, 15, 2);
+		/* 5-2. Common : Fill the UVDMHeader*/
+		set_uvdmheader(SendMSG, SAMSUNG_VENDOR_ID, 0);
+		/* 5-3. Common : Fill the SEC RXHeader */
+		set_sec_uvdm_rxdata_header(SendMSG, cur_uvdmset_num, cur_uvdmset_data, ack);
+		/* 5-4. Send data to PDIC */
+		REG_ADD = REG_SSM_MSG_SEND;
+		write_size = get_writesize(SendMSG);
+		s2mm005_write_byte(usbpd_data->i2c, REG_ADD, SendMSG, write_size);
+		/* send uVDM message */
+		REG_ADD = REG_I2C_SLV_CMD;
+		W_DATA[0] = MODE_INTERFACE;
+		W_DATA[1] = SEL_SSM_MSG_REQ;
+		s2mm005_write_byte(i2c, REG_ADD, &W_DATA[0], 2);
+
+	} while (cur_uvdmset_num < total_uvdmset_num);
+
+	set_endian(IN_DATA, data, size);
+
+	return size;
 }
 
 void send_dna_audio_unstructured_vdm_message(void * data, int cmd)

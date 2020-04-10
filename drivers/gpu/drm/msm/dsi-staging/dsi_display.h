@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2018, The Linux Foundation.All rights reserved.
+ * Copyright (c) 2015-2019, The Linux Foundation.All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,7 +29,6 @@
 #include "dsi_phy.h"
 #include "dsi_panel.h"
 
-#define MAX_DSI_CTRLS_PER_DISPLAY             2
 #define DSI_CLIENT_NAME_SIZE		20
 #define MAX_CMDLINE_PARAM_LEN	 512
 #define MAX_CMD_PAYLOAD_SIZE	256
@@ -116,11 +115,29 @@ struct dsi_display_boot_param {
  * @src_clks:          Source clocks for DSI display.
  * @mux_clks:          Mux clocks used for DFPS.
  * @shadow_clks:       Used for DFPS.
+ * @xo_clks:           XO clocks for DSI display
  */
 struct dsi_display_clk_info {
 	struct dsi_clk_link_set src_clks;
 	struct dsi_clk_link_set mux_clks;
 	struct dsi_clk_link_set shadow_clks;
+	struct dsi_clk_link_set xo_clks;
+};
+
+/**
+ * struct dsi_display_ext_bridge - dsi display external bridge information
+ * @display:           Pointer of DSI display.
+ * @node_of:           Bridge node created from bridge driver.
+ * @bridge:            Bridge created from bridge driver
+ * @orig_funcs:        Bridge function from bridge driver (split mode only)
+ * @bridge_funcs:      Overridden function from bridge driver (split mode only)
+ */
+struct dsi_display_ext_bridge {
+	void *display;
+	struct device_node *node_of;
+	struct drm_bridge *bridge;
+	const struct drm_bridge_funcs *orig_funcs;
+	struct drm_bridge_funcs bridge_funcs;
 };
 
 /**
@@ -131,6 +148,7 @@ struct dsi_display_clk_info {
  * @ext_conn:         Pointer to external connector attached to DSI connector
  * @name:             Name of the display.
  * @display_type:     Display type as defined in device tree.
+ * @dsi_type:         Display label as defined in device tree.
  * @list:             List pointer.
  * @is_active:        Is display active.
  * @is_cont_splash_enabled:  Is continuous splash enabled
@@ -143,7 +161,7 @@ struct dsi_display_clk_info {
  * @ctrl:             Controller information for DSI display.
  * @panel:            Handle to DSI panel.
  * @panel_of:         pHandle to DSI panel.
- * @ext_bridge_of:    pHandle to external DSI bridge.
+ * @ext_bridge:       External bridge information for DSI display.
  * @modes:            Array of probed DSI modes
  * @type:             DSI display type.
  * @clk_master_idx:   The master controller for controlling clocks. This is an
@@ -163,7 +181,6 @@ struct dsi_display_clk_info {
  * @phy_idle_power_off:   PHY power state.
  * @host:             DRM MIPI DSI Host.
  * @bridge:           Pointer to DRM bridge object.
- * @ext_bridge:       Pointer to external bridge object attached to DSI bridge.
  * @cmd_engine_refcount:  Reference count enforcing single instance of cmd eng
  * @clk_mngr:         DSI clock manager.
  * @dsi_clk_handle:   DSI clock handle.
@@ -182,6 +199,7 @@ struct dsi_display {
 
 	const char *name;
 	const char *display_type;
+	const char *dsi_type;
 	struct list_head list;
 	bool is_cont_splash_enabled;
 	bool sw_te_using_wd;
@@ -198,7 +216,9 @@ struct dsi_display {
 	struct device_node *disp_node;
 	struct device_node *panel_of;
 	struct device_node *parser_node;
-	struct device_node *ext_bridge_of;
+
+	/* external bridge */
+	struct dsi_display_ext_bridge ext_bridge[MAX_EXT_BRIDGE_PORT_CONFIG];
 
 	struct dsi_display_mode *modes;
 
@@ -228,7 +248,6 @@ struct dsi_display {
 
 	struct mipi_dsi_host host;
 	struct dsi_bridge    *bridge;
-	struct drm_bridge    *ext_bridge;
 	u32 cmd_engine_refcount;
 
 	struct sde_power_handle *phandle;
@@ -391,13 +410,14 @@ int dsi_display_validate_mode(struct dsi_display *display,
 			      u32 flags);
 
 /**
- * dsi_display_validate_mode_vrr() - validates mode if variable refresh case
+ * dsi_display_validate_mode_change() - validates mode if variable refresh case
+ *				or dynamic clk change case
  * @display:             Handle to display.
  * @mode:                Mode to be validated..
  *
  * Return: 0 if  error code.
  */
-int dsi_display_validate_mode_vrr(struct dsi_display *display,
+int dsi_display_validate_mode_change(struct dsi_display *display,
 			struct dsi_display_mode *cur_dsi_mode,
 			struct dsi_display_mode *mode);
 
@@ -650,6 +670,15 @@ int dsi_display_set_power(struct drm_connector *connector,
 int dsi_display_pre_kickoff(struct drm_connector *connector,
 		struct dsi_display *display,
 		struct msm_display_kickoff_params *params);
+/*
+ * dsi_display_pre_commit - program pre commit features
+ * @display: Pointer to private display structure
+ * @params: Parameters for pre commit time programming
+ * Returns: Zero on success
+ */
+int dsi_display_pre_commit(void *display,
+		struct msm_display_conn_params *params);
+
 /**
  * dsi_display_get_dst_format() - get dst_format from DSI display
  * @connector:        Pointer to drm connector structure

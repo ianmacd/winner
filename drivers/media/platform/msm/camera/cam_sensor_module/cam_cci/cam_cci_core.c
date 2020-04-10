@@ -1776,7 +1776,6 @@ int32_t cam_cci_core_cfg(struct v4l2_subdev *sd,
 		rc = cam_cci_write(sd, cci_ctrl);
 		if (rc)
 			cci_error_status[cci_dev->soc_info.index][master] = TRUE;
-		break;
 	case MSM_CCI_GPIO_WRITE:
 		break;
 	case MSM_CCI_SET_SYNC_CID:

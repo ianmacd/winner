@@ -5286,11 +5286,6 @@ ext4_trim_all_free(struct super_block *sb, ext4_group_t group,
 			break;
 		}
 
-		if (sb_rdonly(sb)) {
-			count = -EROFS;
-			break;
-		}
-
 		if (need_resched()) {
 			ext4_unlock_group(sb, group);
 			cond_resched();

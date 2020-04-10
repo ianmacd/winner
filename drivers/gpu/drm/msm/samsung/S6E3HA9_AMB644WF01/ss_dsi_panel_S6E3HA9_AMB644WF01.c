@@ -1745,17 +1745,17 @@ static int poc_erase(struct samsung_display_driver_data *vdd, u32 erase_pos, u32
 		return -EINVAL;
 	}
 
+	if (!ss_is_ready_to_send_cmd(vdd)) {
+		LCD_ERR("Panel is not ready. Panel State(%d)\n", vdd->panel_state);
+		return -EBUSY;
+	}
+
 	if (vdd->poc_driver.erase_sector_addr_idx[0] < 0) {
 		LCD_ERR("sector addr index is not implemented.. %d\n",
 			vdd->poc_driver.erase_sector_addr_idx[0]);
 		return -EINVAL;
 	}
 
-	if (!ss_is_ready_to_send_cmd(vdd)) {
-		LCD_ERR("Panel is not ready. Panel State(%d)\n", vdd->panel_state);
-		return -EBUSY;
-	}
-	
 	poc_erase_sector_tx_cmds = ss_get_cmds(vdd, TX_POC_ERASE_SECTOR);
 	if (SS_IS_CMDS_NULL(poc_erase_sector_tx_cmds)) {
 		LCD_ERR("No cmds for TX_POC_ERASE_SECTOR..\n");
@@ -1873,11 +1873,6 @@ static int poc_write(struct samsung_display_driver_data *vdd, u8 *data, u32 writ
 		return -EINVAL;
 	}
 
-	if (!ss_is_ready_to_send_cmd(vdd)) {
-		LCD_ERR("Panel is not ready. Panel State(%d)\n", vdd->panel_state);
-		return -EBUSY;
-	}
-	
 	write_cmd = ss_get_cmds(vdd, TX_POC_WRITE_LOOP_256BYTE);
 	if (SS_IS_CMDS_NULL(write_cmd)) {
 		LCD_ERR("no cmds for TX_POC_WRITE_LOOP_256BYTE..\n");
@@ -2062,11 +2057,6 @@ static int poc_read(struct samsung_display_driver_data *vdd, u8 *buf, u32 read_p
 	if (IS_ERR_OR_NULL(display)) {
 		LCD_ERR("no display");
 		return -EINVAL;
-	}
-
-	if (!ss_is_ready_to_send_cmd(vdd)) {
-		LCD_ERR("Panel is not ready. Panel State(%d)\n", vdd->panel_state);
-		return -EBUSY;
 	}
 
 	poc_read_tx_cmds = ss_get_cmds(vdd, TX_POC_READ);

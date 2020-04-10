@@ -41,6 +41,7 @@
 #include <linux/kthread.h>
 #include <uapi/linux/sched/types.h>
 #include <drm/drm_of.h>
+#include <soc/qcom/boot_stats.h>
 #include "msm_drv.h"
 #include "msm_debugfs.h"
 #include "msm_fence.h"
@@ -255,66 +256,46 @@ u32 msm_readl(const void __iomem *addr)
 	return val;
 }
 
-struct vblank_event {
-	struct list_head node;
+struct vblank_work {
+	struct kthread_work work;
 	int crtc_id;
 	bool enable;
+	struct msm_drm_private *priv;
 };
 
 static void vblank_ctrl_worker(struct kthread_work *work)
 {
-	struct msm_vblank_ctrl *vbl_ctrl = container_of(work,
-						struct msm_vblank_ctrl, work);
-	struct msm_drm_private *priv = vbl_ctrl->priv;
+	struct vblank_work *cur_work = container_of(work,
+					struct vblank_work, work);
+	struct msm_drm_private *priv = cur_work->priv;
 	struct msm_kms *kms = priv->kms;
-	struct vblank_event *vbl_ev, *tmp;
-	unsigned long flags;
-	LIST_HEAD(tmp_head);
 
-	spin_lock_irqsave(&vbl_ctrl->lock, flags);
-	list_for_each_entry_safe(vbl_ev, tmp, &vbl_ctrl->event_list, node) {
-		list_del(&vbl_ev->node);
-		list_add_tail(&vbl_ev->node, &tmp_head);
-	}
-	spin_unlock_irqrestore(&vbl_ctrl->lock, flags);
+	if (cur_work->enable)
+		kms->funcs->enable_vblank(kms, priv->crtcs[cur_work->crtc_id]);
+	else
+		kms->funcs->disable_vblank(kms, priv->crtcs[cur_work->crtc_id]);
 
-	list_for_each_entry_safe(vbl_ev, tmp, &tmp_head, node) {
-		if (vbl_ev->enable)
-			kms->funcs->enable_vblank(kms,
-						priv->crtcs[vbl_ev->crtc_id]);
-		else
-			kms->funcs->disable_vblank(kms,
-						priv->crtcs[vbl_ev->crtc_id]);
-
-		kfree(vbl_ev);
-	}
+	kfree(cur_work);
 }
 
 static int vblank_ctrl_queue_work(struct msm_drm_private *priv,
 					int crtc_id, bool enable)
 {
-	struct msm_vblank_ctrl *vbl_ctrl;
-	struct vblank_event *vbl_ev;
-	unsigned long flags;
+	struct vblank_work *cur_work;
 
 	if (!priv || crtc_id >= priv->num_crtcs)
 		return -EINVAL;
 
-	vbl_ev = kzalloc(sizeof(*vbl_ev), GFP_ATOMIC);
-	if (!vbl_ev)
+	cur_work = kzalloc(sizeof(*cur_work), GFP_ATOMIC);
+	if (!cur_work)
 		return -ENOMEM;
 
-	vbl_ev->crtc_id = crtc_id;
-	vbl_ev->enable = enable;
+	kthread_init_work(&cur_work->work, vblank_ctrl_worker);
+	cur_work->crtc_id = crtc_id;
+	cur_work->enable = enable;
+	cur_work->priv = priv;
 
-	vbl_ctrl = &priv->vblank_ctrl[crtc_id];
-
-	spin_lock_irqsave(&vbl_ctrl->lock, flags);
-	list_add_tail(&vbl_ev->node, &vbl_ctrl->event_list);
-	spin_unlock_irqrestore(&vbl_ctrl->lock, flags);
-
-	kthread_queue_work(&priv->disp_thread[crtc_id].worker,
-			&vbl_ctrl->work);
+	kthread_queue_work(&priv->disp_thread[crtc_id].worker, &cur_work->work);
 
 	return 0;
 }
@@ -326,23 +307,7 @@ static int msm_drm_uninit(struct device *dev)
 	struct msm_drm_private *priv = ddev->dev_private;
 	struct msm_kms *kms = priv->kms;
 	struct msm_gpu *gpu = priv->gpu;
-	struct msm_vblank_ctrl *vbl_ctrl;
-	struct vblank_event *vbl_ev, *tmp;
 	int i;
-
-	/* We must cancel and cleanup any pending vblank enable/disable
-	 * work before drm_irq_uninstall() to avoid work re-enabling an
-	 * irq after uninstall has disabled it.
-	 */
-	for (i = 0; i < priv->num_crtcs; i++) {
-		vbl_ctrl = &priv->vblank_ctrl[i];
-		kthread_flush_work(&vbl_ctrl->work);
-		list_for_each_entry_safe(vbl_ev, tmp,
-			&vbl_ctrl->event_list, node) {
-			list_del(&vbl_ev->node);
-			kfree(vbl_ev);
-		}
-	}
 
 	/* clean up display commit/event worker threads */
 	for (i = 0; i < priv->num_crtcs; i++) {
@@ -668,15 +633,6 @@ static int msm_drm_init(struct device *dev, struct drm_driver *drv)
 		}
 	}
 
-	/* Create vblank ctrl for each display */
-	for (i = 0; i < priv->num_crtcs; i++) {
-		kthread_init_work(&priv->vblank_ctrl[i].work,
-			vblank_ctrl_worker);
-		INIT_LIST_HEAD(&priv->vblank_ctrl[i].event_list);
-		spin_lock_init(&priv->vblank_ctrl[i].lock);
-		priv->vblank_ctrl[i].priv = priv;
-	}
-
 	/**
 	 * this priority was found during empiric testing to have appropriate
 	 * realtime scheduling to process display updates and interact with
@@ -836,6 +792,7 @@ static int msm_drm_init(struct device *dev, struct drm_driver *drv)
 	}
 
 	drm_kms_helper_poll_init(ddev);
+	place_marker("M - DISPLAY Driver Ready");
 
 	pr_err("%s -- \n", __func__);
 
@@ -897,7 +854,7 @@ static int msm_open(struct drm_device *dev, struct drm_file *file)
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
-	
+
 	mutex_init(&ctx->power_lock);
 
 	file->driver_priv = ctx;
@@ -935,13 +892,14 @@ static void msm_postclose(struct drm_device *dev, struct drm_file *file)
 	if (ctx == priv->lastctx)
 		priv->lastctx = NULL;
 	mutex_unlock(&dev->struct_mutex);
-	
+
 	mutex_lock(&ctx->power_lock);
-	if (ctx->enable_refcnt)
+	if (ctx->enable_refcnt) {
+		SDE_EVT32(ctx->enable_refcnt);
 		sde_power_resource_enable(&priv->phandle,
 				priv->pclient, false);
+	}
 	mutex_unlock(&ctx->power_lock);
-	mutex_destroy(&ctx->power_lock);
 
 	kfree(ctx);
 }
@@ -1342,7 +1300,8 @@ static int msm_drm_object_supports_event(struct drm_device *dev,
 	int ret = -EINVAL;
 	struct drm_mode_object *arg_obj;
 
-	arg_obj = drm_mode_object_find(dev, req->object_id, req->object_type);
+	arg_obj = drm_mode_object_find(dev, NULL,
+				req->object_id, req->object_type);
 	if (!arg_obj)
 		return -ENOENT;
 
@@ -1369,7 +1328,8 @@ static int msm_register_event(struct drm_device *dev,
 	struct msm_kms *kms = priv->kms;
 	struct drm_mode_object *arg_obj;
 
-	arg_obj = drm_mode_object_find(dev, req->object_id, req->object_type);
+	arg_obj = drm_mode_object_find(dev, NULL,
+				req->object_id, req->object_type);
 	if (!arg_obj)
 		return -ENOENT;
 
@@ -1632,7 +1592,7 @@ int msm_ioctl_rmfb2(struct drm_device *dev, void *data,
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EINVAL;
 
-	fb = drm_framebuffer_lookup(dev, *id);
+	fb = drm_framebuffer_lookup(dev, file_priv, *id);
 	if (!fb)
 		return -ENOENT;
 
@@ -1664,7 +1624,7 @@ EXPORT_SYMBOL(msm_ioctl_rmfb2);
  * @file_priv: drm file for the ioctl call
  *
  */
-int msm_ioctl_power_ctrl(struct drm_device *dev, void *data,
+static int msm_ioctl_power_ctrl(struct drm_device *dev, void *data,
 			struct drm_file *file_priv)
 {
 	struct msm_file_private *ctx = file_priv->driver_priv;
@@ -1674,19 +1634,9 @@ int msm_ioctl_power_ctrl(struct drm_device *dev, void *data,
 	int old_cnt;
 	int rc = 0;
 
-	if (unlikely(!dev)) {
-		pr_err("invalid device for power ctl IOCTL\n");
-		return -ENODEV;
-	}
-
 	if (unlikely(!power_ctrl)) {
-		pr_err("invalid ioctl data\n");
+		DRM_ERROR("invalid ioctl data\n");
 		return -EINVAL;
-	}
-
-	if (unlikely(!dev->dev_private)) {
-		pr_err("driver private data invalid\n");
-		return -ENXIO;
 	}
 
 	priv = dev->dev_private;
@@ -1702,6 +1652,8 @@ int msm_ioctl_power_ctrl(struct drm_device *dev, void *data,
 		ctx->enable_refcnt--;
 		if (!ctx->enable_refcnt)
 			vote_req = true;
+	} else {
+		pr_err("ignoring, unbalanced disable\n");
 	}
 
 	if (vote_req) {
@@ -1720,7 +1672,6 @@ int msm_ioctl_power_ctrl(struct drm_device *dev, void *data,
 	mutex_unlock(&ctx->power_lock);
 	return rc;
 }
-
 
 static const struct drm_ioctl_desc msm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(MSM_GET_PARAM,    msm_ioctl_get_param,    DRM_AUTH|DRM_RENDER_ALLOW),
@@ -1988,6 +1939,12 @@ static int add_display_components(struct device *dev,
 			node = of_parse_phandle(np, "connectors", i);
 			if (!node)
 				break;
+#ifndef CONFIG_SEC_DISPLAYPORT
+			if (!strncmp(node->name, "qcom,dp_display", 15)) {
+				pr_info("[drm-dp] disabled displayport!\n");
+				continue;
+			}
+#endif
 
 			component_match_add(dev, matchptr, compare_of, node);
 		}
@@ -2054,6 +2011,34 @@ msm_gem_smmu_address_space_get(struct drm_device *dev,
 		return NULL;
 
 	return funcs->get_address_space(priv->kms, domain);
+}
+
+int msm_get_mixer_count(struct msm_drm_private *priv,
+		const struct drm_display_mode *mode,
+		u32 max_mixer_width, u32 *num_lm)
+{
+	struct msm_kms *kms;
+	const struct msm_kms_funcs *funcs;
+
+	if (!priv) {
+		DRM_ERROR("invalid drm private struct");
+		return -EINVAL;
+	}
+
+	kms = priv->kms;
+	if (!kms) {
+		DRM_ERROR("invalid msm kms struct");
+		return -EINVAL;
+	}
+
+	funcs = kms->funcs;
+	if (!funcs || !funcs->get_mixer_count) {
+		DRM_ERROR("invlaid function pointers");
+		return -EINVAL;
+	}
+
+	return funcs->get_mixer_count(priv->kms, mode,
+			max_mixer_width, num_lm);
 }
 
 /*
@@ -2123,6 +2108,11 @@ static int msm_pdev_probe(struct platform_device *pdev)
 	ret = add_gpu_components(&pdev->dev, &match);
 	if (ret)
 		return ret;
+
+	if (!match)
+		return -ENODEV;
+
+	device_enable_async_suspend(&pdev->dev);
 
 	pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 	return component_master_add_with_match(&pdev->dev, &msm_drm_ops, match);

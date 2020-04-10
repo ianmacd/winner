@@ -65,19 +65,19 @@ struct msm_gem_address_space;
 struct msm_gem_vma;
 
 #define NUM_DOMAINS    4    /* one for KMS, then one per gpu core (?) */
-#define MAX_CRTCS      8
+#define MAX_CRTCS      16
 #define MAX_PLANES     20
-#define MAX_ENCODERS   8
-#define MAX_BRIDGES    8
-#define MAX_CONNECTORS 8
+#define MAX_ENCODERS   16
+#define MAX_BRIDGES    16
+#define MAX_CONNECTORS 16
 
 #define TEARDOWN_DEADLOCK_RETRY_MAX 5
 
 struct msm_file_private {
-	/* update the refcount when user driver calls power_ctrl IOCTL*/
+	/* update the refcount when user driver calls power_ctrl IOCTL */
 	unsigned short enable_refcnt;
 
-	/* protects enable_refcnt*/
+	/* protects enable_refcnt */
 	struct mutex power_lock;
 };
 
@@ -199,16 +199,12 @@ enum msm_mdp_conn_property {
 	CONNECTOR_PROP_LP,
 	CONNECTOR_PROP_FB_TRANSLATION_MODE,
 	CONNECTOR_PROP_QSYNC_MODE,
-
+#if defined(CONFIG_DISPLAY_SAMSUNG)
+	/* SAMSUNG_FINGERPRINT */
+	CONNECTOR_PROP_FINGERPRINT_MASK,
+#endif
 	/* total # of properties */
 	CONNECTOR_PROP_COUNT
-};
-
-struct msm_vblank_ctrl {
-	struct kthread_work work;
-	struct list_head event_list;
-	spinlock_t lock;
-	struct msm_drm_private *priv;
 };
 
 #define MAX_H_TILES_PER_DISPLAY 2
@@ -244,6 +240,7 @@ enum msm_display_compression_ratio {
  * @MSM_DISPLAY_CAP_EDID:               EDID supported
  * @MSM_DISPLAY_ESD_ENABLED:            ESD feature enabled
  * @MSM_DISPLAY_CAP_MST_MODE:           Display with MST support
+ * @MSM_DISPLAY_SPLIT_LINK:             Split Link enabled
  */
 enum msm_display_caps {
 	MSM_DISPLAY_CAP_VID_MODE	= BIT(0),
@@ -252,6 +249,7 @@ enum msm_display_caps {
 	MSM_DISPLAY_CAP_EDID		= BIT(3),
 	MSM_DISPLAY_ESD_ENABLED		= BIT(4),
 	MSM_DISPLAY_CAP_MST_MODE	= BIT(5),
+	MSM_DISPLAY_SPLIT_LINK		= BIT(6),
 };
 
 /**
@@ -348,6 +346,7 @@ struct msm_roi_caps {
  * @range_min_qp:            Min QP allowed.
  * @range_max_qp:            Max QP allowed.
  * @range_bpg_offset:        Bits per group adjustment.
+ * @extra_width:             Extra width required in timing calculations
  */
 struct msm_display_dsc_info {
 	u8 version;
@@ -403,6 +402,8 @@ struct msm_display_dsc_info {
 	char *range_min_qp;
 	char *range_max_qp;
 	char *range_bpg_offset;
+
+	u32 extra_width;
 };
 
 /**
@@ -445,6 +446,10 @@ struct msm_display_topology {
  * @comp_info:       compression info supported
  * @roi_caps:        panel roi capabilities
  * @wide_bus_en:	wide-bus mode cfg for interface module
+ * @mdp_transfer_time_us   Specifies the mdp transfer time for command mode
+ *                         panels in microseconds.
+ * @vpadding:        panel stacking height
+ * @overlap_pixels:	overlap pixels for certain panels
  */
 struct msm_mode_info {
 	uint32_t frame_rate;
@@ -457,6 +462,9 @@ struct msm_mode_info {
 	struct msm_compression_info comp_info;
 	struct msm_roi_caps roi_caps;
 	bool wide_bus_en;
+	u32 mdp_transfer_time_us;
+	u32 vpadding;
+	u32 overlap_pixels;
 };
 
 /**
@@ -526,6 +534,14 @@ struct msm_roi_list {
 struct msm_display_kickoff_params {
 	struct msm_roi_list *rois;
 	struct drm_msm_ext_hdr_metadata *hdr_meta;
+};
+
+/**
+ * struct - msm_display_conn_params - info of dpu display features
+ * @qsync_mode: Qsync mode, where 0: disabled 1: continuous mode
+ * @qsync_update: Qsync settings were changed/updated
+ */
+struct msm_display_conn_params {
 	uint32_t qsync_mode;
 	bool qsync_update;
 };
@@ -643,8 +659,6 @@ struct msm_drm_private {
 
 	struct notifier_block vmap_notifier;
 	struct shrinker shrinker;
-
-	struct msm_vblank_ctrl vblank_ctrl[MAX_CRTCS];
 
 	/* task holding struct_mutex.. currently only used in submit path
 	 * to detect and reject faults from copy_from_user() for submit
@@ -978,4 +992,7 @@ static inline unsigned long timeout_to_jiffies(const ktime_t *timeout)
 	return remaining_jiffies;
 }
 
+int msm_get_mixer_count(struct msm_drm_private *priv,
+		const struct drm_display_mode *mode,
+		u32 max_mixer_width, u32 *num_lm);
 #endif /* __MSM_DRV_H__ */

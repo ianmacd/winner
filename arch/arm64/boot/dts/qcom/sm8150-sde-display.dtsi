@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -124,6 +124,50 @@
 		};
 	};
 
+	dsi_panel_pwr_supply_vdd_labibb: dsi_panel_pwr_supply_vdd_labibb {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		qcom,panel-supply-entry@0 {
+			reg = <0>;
+			qcom,supply-name = "vddio";
+			qcom,supply-min-voltage = <1800000>;
+			qcom,supply-max-voltage = <1800000>;
+			qcom,supply-enable-load = <62000>;
+			qcom,supply-disable-load = <80>;
+			qcom,supply-post-on-sleep = <20>;
+		};
+
+		qcom,panel-supply-entry@1 {
+			reg = <1>;
+			qcom,supply-name = "vdd";
+			qcom,supply-min-voltage = <1800000>;
+			qcom,supply-max-voltage = <1800000>;
+			qcom,supply-enable-load = <857000>;
+			qcom,supply-disable-load = <0>;
+			qcom,supply-post-on-sleep = <0>;
+		};
+
+		qcom,panel-supply-entry@2 {
+			reg = <1>;
+			qcom,supply-name = "lab";
+			qcom,supply-min-voltage = <4600000>;
+			qcom,supply-max-voltage = <5200000>;
+			qcom,supply-enable-load = <100000>;
+			qcom,supply-disable-load = <100>;
+		};
+
+		qcom,panel-supply-entry@3 {
+			reg = <2>;
+			qcom,supply-name = "ibb";
+			qcom,supply-min-voltage = <800000>;
+			qcom,supply-max-voltage = <5400000>;
+			qcom,supply-enable-load = <100000>;
+			qcom,supply-disable-load = <100>;
+			qcom,supply-post-on-sleep = <20>;
+		};
+	};
+
 	display_panel_avdd_eldo: display-gpio-regulator@0 {
 		compatible = "regulator-fixed";
 		regulator-name = "display_panel_avdd_eldo";
@@ -145,7 +189,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sharp_4k_dsc_video>;
 	};
@@ -156,7 +200,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sharp_4k_dsc_cmd>;
 	};
@@ -167,7 +211,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sharp_1080_cmd>;
 	};
@@ -178,7 +222,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_dual_sharp_1080_120hz_cmd>;
 	};
@@ -189,7 +233,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_dual_nt35597_truly_video>;
 	};
@@ -200,7 +244,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_dual_nt35597_truly_cmd>;
 	};
@@ -211,7 +255,7 @@
 
 		qcom,dsi-ctrl-num = <1>;
 		qcom,dsi-phy-num = <1>;
-		qcom,dsi-select-clocks = "src_byte_clk1", "src_pixel_clk1";
+		qcom,dsi-select-clocks = "mux_byte_clk1", "mux_pixel_clk1";
 
 		qcom,dsi-panel = <&dsi_nt35597_truly_dsc_cmd>;
 	};
@@ -222,7 +266,7 @@
 
 		qcom,dsi-ctrl-num = <1>;
 		qcom,dsi-phy-num = <1>;
-		qcom,dsi-select-clocks = "src_byte_clk1", "src_pixel_clk1";
+		qcom,dsi-select-clocks = "mux_byte_clk1", "mux_pixel_clk1";
 
 		qcom,dsi-panel = <&dsi_nt35597_truly_dsc_video>;
 	};
@@ -233,7 +277,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sim_vid>;
 	};
@@ -244,7 +288,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_dual_sim_vid>;
 	};
@@ -255,7 +299,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sim_cmd>;
 	};
@@ -266,7 +310,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_dual_sim_cmd>;
 	};
@@ -277,7 +321,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sim_dsc_375_cmd>;
 	};
@@ -288,7 +332,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_dual_sim_dsc_375_cmd>;
 	};
@@ -299,7 +343,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sw43404_amoled_cmd>;
 	};
@@ -310,7 +354,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_nt35695b_truly_fhd_cmd>;
 
@@ -322,7 +366,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_nt35695b_truly_fhd_video>;
 	};
@@ -333,7 +377,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sw43404_amoled_video>;
 	};
@@ -344,7 +388,7 @@
 
 		qcom,dsi-ctrl-num = <0>;
 		qcom,dsi-phy-num = <0>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_sw43404_amoled_fhd_plus_cmd>;
 	};
@@ -355,7 +399,7 @@
 
 		qcom,dsi-ctrl-num = <0 1>;
 		qcom,dsi-phy-num = <0 1>;
-		qcom,dsi-select-clocks = "src_byte_clk0", "src_pixel_clk0";
+		qcom,dsi-select-clocks = "mux_byte_clk0", "mux_pixel_clk0";
 
 		qcom,dsi-panel = <&dsi_dual_nt36850_truly_cmd>;
 	};
@@ -366,7 +410,7 @@
 
 		qcom,dsi-ctrl-num = <1>;
 		qcom,dsi-phy-num = <1>;
-		qcom,dsi-select-clocks = "src_byte_clk1", "src_pixel_clk1";
+		qcom,dsi-select-clocks = "mux_byte_clk1", "mux_pixel_clk1";
 
 		qcom,dsi-panel = <&dsi_nt35695b_truly_fhd_cmd>;
 
@@ -378,7 +422,7 @@
 
 		qcom,dsi-ctrl-num = <1>;
 		qcom,dsi-phy-num = <1>;
-		qcom,dsi-select-clocks = "src_byte_clk1", "src_pixel_clk1";
+		qcom,dsi-select-clocks = "mux_byte_clk1", "mux_pixel_clk1";
 
 		qcom,dsi-panel = <&dsi_nt35695b_truly_fhd_video>;
 	};
@@ -390,7 +434,7 @@
 
 		qcom,dsi-ctrl-num = <1>;
 		qcom,dsi-phy-num = <1>;
-		qcom,dsi-select-clocks = "src_byte_clk1", "src_pixel_clk1";
+		qcom,dsi-select-clocks = "mux_byte_clk1", "mux_pixel_clk1";
 
 		qcom,dsi-panel = <&dsi_sim_sec_hd_cmd>;
 	};
@@ -406,8 +450,8 @@
 			 <&mdss_dsi0_pll PCLK_MUX_0_CLK>,
 			 <&mdss_dsi1_pll BYTECLK_MUX_1_CLK>,
 			 <&mdss_dsi1_pll PCLK_MUX_1_CLK>;
-		clock-names = "src_byte_clk0", "src_pixel_clk0",
-			      "src_byte_clk1", "src_pixel_clk1";
+		clock-names = "mux_byte_clk0", "mux_pixel_clk0",
+			      "mux_byte_clk1", "mux_pixel_clk1";
 
 		pinctrl-names = "panel_active", "panel_suspend";
 		pinctrl-0 = <&sde_dsi_active &sde_te_active>;
@@ -455,8 +499,8 @@
 			 <&mdss_dsi0_pll PCLK_MUX_0_CLK>,
 			 <&mdss_dsi1_pll BYTECLK_MUX_1_CLK>,
 			 <&mdss_dsi1_pll PCLK_MUX_1_CLK>;
-		clock-names = "src_byte_clk0", "src_pixel_clk0",
-			      "src_byte_clk1", "src_pixel_clk1";
+		clock-names = "mux_byte_clk0", "mux_pixel_clk0",
+			      "mux_byte_clk1", "mux_pixel_clk1";
 
 		pinctrl-names = "panel_active", "panel_suspend";
 		pinctrl-0 = <&sde_dsi1_active &sde_te1_active>;
@@ -496,8 +540,6 @@
 	qcom,ext-disp = <&ext_disp>;
 	qcom,dp-aux-switch = <&fsa4480>;
 
-	qcom,aux-en-gpio = <&tlmm 43 0>;
-	qcom,aux-sel-gpio = <&tlmm 51 0>;
 	qcom,usbplug-cc-gpio = <&tlmm 38 0>;
 
 	pinctrl-names = "mdss_dp_active", "mdss_dp_sleep";
@@ -511,8 +553,7 @@
 
 /* PHY TIMINGS REVISION T */
 &dsi_dual_nt35597_truly_video {
-	qcom,mdss-dsi-min-refresh-rate = <53>;
-	qcom,mdss-dsi-max-refresh-rate = <60>;
+	qcom,dsi-supported-dfps-list = <60 55 53>;
 	qcom,mdss-dsi-pan-enable-dynamic-fps;
 	qcom,mdss-dsi-pan-fps-update = "dfps_immediate_porch_mode_vfp";
 	qcom,esd-check-enabled;
@@ -899,6 +940,7 @@
 				08 05 03 04 00 1a 18];
 			qcom,display-topology = <2 0 2>;
 			qcom,default-topology-index = <0>;
+			qcom,mdss-mdp-transfer-time-us = <16700>;
 		};
 	};
 };

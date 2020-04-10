@@ -22,9 +22,9 @@ ifeq ($(KERNEL_BUILD), 0)
 		INCS    +=  -include $(AUDIO_ROOT)/config/sm6150autoconf.h
 	endif
 	ifeq ($(CONFIG_ARCH_TRINKET), y)
-		include $(AUDIO_ROOT)/config/sm6150auto.conf
+		include $(AUDIO_ROOT)/config/trinketauto.conf
 		export
-		INCS    +=  -include $(AUDIO_ROOT)/config/sm6150autoconf.h
+		INCS    +=  -include $(AUDIO_ROOT)/config/trinketautoconf.h
 	endif
 endif
 
@@ -105,6 +105,10 @@ KBUILD_EXTRA_SYMBOLS +=$(OUT)/obj/vendor/qcom/opensource/audio-kernel/dsp/Module
 KBUILD_EXTRA_SYMBOLS +=$(OUT)/obj/vendor/qcom/opensource/audio-kernel/asoc/Module.symvers
 KBUILD_EXTRA_SYMBOLS +=$(OUT)/obj/vendor/qcom/opensource/audio-kernel/asoc/codecs/Module.symvers
 KBUILD_EXTRA_SYMBOLS +=$(OUT)/obj/vendor/qcom/opensource/audio-kernel/soc/Module.symvers
+endif
+
+ifeq ($(CONFIG_SND_SOC_GCOV), y)
+GCOV_PROFILE := y
 endif
 
 # Module information used by KBuild framework

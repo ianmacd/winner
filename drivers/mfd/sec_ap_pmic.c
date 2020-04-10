@@ -18,7 +18,7 @@
 #include <linux/device.h>
 #include <linux/proc_fs.h>
 #include <linux/input/qpnp-power-on.h>
-#include <linux/sec_crashkey.h>
+#include <linux/sec_debug.h>
 
 /* for enable/disable manual reset, from retail group's request */
 extern void do_keyboard_notifier(int onoff);
@@ -89,9 +89,17 @@ static ssize_t chg_det_show(struct device *in_dev,
 }
 static DEVICE_ATTR_RO(chg_det);
 
+static ssize_t off_reason_show(struct device *in_dev,
+				struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%s\n", qpnp_pon_get_off_reason());
+}
+static DEVICE_ATTR_RO(off_reason);
+
 static struct attribute *sec_ap_pmic_attributes[] = {
 	&dev_attr_chg_det.attr,
 	&dev_attr_manual_reset.attr,
+	&dev_attr_off_reason.attr,
 	NULL,
 };
 

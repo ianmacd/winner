@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -97,6 +97,78 @@ struct mem_entry_stats {
 
 static void kgsl_cma_unlock_secure(struct kgsl_memdesc *memdesc);
 
+static ssize_t
+imported_mem_show(struct kgsl_process_private *priv,
+				int type, char *buf)
+{
+	struct kgsl_mem_entry *entry;
+	uint64_t imported_mem = 0;
+	int id = 0;
+
+	spin_lock(&priv->mem_lock);
+	for (entry = idr_get_next(&priv->mem_idr, &id); entry;
+		id++, entry = idr_get_next(&priv->mem_idr, &id)) {
+
+		int egl_surface_count = 0, egl_image_count = 0;
+		struct kgsl_memdesc *m;
+
+		if (kgsl_mem_entry_get(entry) == 0)
+			continue;
+		spin_unlock(&priv->mem_lock);
+
+		m = &entry->memdesc;
+		if (kgsl_memdesc_usermem_type(m) == KGSL_MEM_ENTRY_ION) {
+			kgsl_get_egl_counts(entry, &egl_surface_count,
+					&egl_image_count);
+
+			if (kgsl_memdesc_get_memtype(m) ==
+						KGSL_MEMTYPE_EGL_SURFACE)
+				imported_mem += m->size;
+			else if (egl_surface_count == 0) {
+				uint64_t size = m->size;
+
+				do_div(size, (egl_image_count ?
+							egl_image_count : 1));
+				imported_mem += size;
+			}
+		}
+
+		kgsl_mem_entry_put(entry);
+		spin_lock(&priv->mem_lock);
+	}
+	spin_unlock(&priv->mem_lock);
+
+	return scnprintf(buf, PAGE_SIZE, "%llu\n", imported_mem);
+}
+
+static ssize_t
+gpumem_mapped_show(struct kgsl_process_private *priv,
+				int type, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+			(u64)atomic64_read(&priv->gpumem_mapped));
+}
+
+static ssize_t
+gpumem_unmapped_show(struct kgsl_process_private *priv, int type, char *buf)
+{
+	u64 gpumem_total = atomic64_read(&priv->stats[type].cur);
+	u64 gpumem_mapped = atomic64_read(&priv->gpumem_mapped);
+
+	if (gpumem_mapped > gpumem_total)
+		return -EIO;
+
+	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+			gpumem_total - gpumem_mapped);
+}
+
+static struct kgsl_mem_entry_attribute debug_memstats[] = {
+	__MEM_ENTRY_ATTR(0, imported_mem, imported_mem_show),
+	__MEM_ENTRY_ATTR(0, gpumem_mapped, gpumem_mapped_show),
+	__MEM_ENTRY_ATTR(KGSL_MEM_ENTRY_KERNEL, gpumem_unmapped,
+				gpumem_unmapped_show),
+};
+
 /**
  * Show the current amount of memory allocated for the given memtype
  */
@@ -104,7 +176,8 @@ static void kgsl_cma_unlock_secure(struct kgsl_memdesc *memdesc);
 static ssize_t
 mem_entry_show(struct kgsl_process_private *priv, int type, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%llu\n", priv->stats[type].cur);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+			(u64)atomic64_read(&priv->stats[type].cur));
 }
 
 /**
@@ -115,7 +188,8 @@ mem_entry_show(struct kgsl_process_private *priv, int type, char *buf)
 static ssize_t
 mem_entry_max_show(struct kgsl_process_private *priv, int type, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%llu\n", priv->stats[type].max);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+			(u64)atomic64_read(&priv->stats[type].max));
 }
 
 static ssize_t mem_entry_sysfs_show(struct kobject *kobj,
@@ -219,7 +293,13 @@ void kgsl_process_init_sysfs(struct kgsl_device *device,
 			&mem_stats[i].max_attr.attr))
 			WARN(1, "Couldn't create sysfs file '%s'\n",
 				mem_stats[i].max_attr.attr.name);
+	}
 
+	for (i = 0; i < ARRAY_SIZE(debug_memstats); i++) {
+		if (sysfs_create_file(&private->kobj,
+			&debug_memstats[i].attr))
+			WARN(1, "Couldn't create sysfs file '%s'\n",
+				debug_memstats[i].attr.name);
 	}
 }
 
@@ -373,7 +453,7 @@ static int kgsl_page_alloc_vmfault(struct kgsl_memdesc *memdesc,
 		get_page(page);
 		vmf->page = page;
 
-		memdesc->mapsize += PAGE_SIZE;
+		atomic64_add(PAGE_SIZE, &memdesc->mapsize);
 
 		return 0;
 	}
@@ -407,7 +487,7 @@ done:
 	mutex_unlock(&kernel_map_global_lock);
 }
 
-static int kgsl_lock_sgt(struct sg_table *sgt)
+int kgsl_lock_sgt(struct sg_table *sgt, uint64_t size)
 {
 	struct scatterlist *sg;
 	int dest_perms = PERM_READ | PERM_WRITE;
@@ -417,15 +497,29 @@ static int kgsl_lock_sgt(struct sg_table *sgt)
 	int i;
 
 	ret = hyp_assign_table(sgt, &source_vm, 1, &dest_vm, &dest_perms, 1);
-	if (!ret) {
-		/* Set private bit for each sg to indicate that its secured */
-		for_each_sg(sgt->sgl, sg, sgt->nents, i)
-			SetPagePrivate(sg_page(sg));
+	if (ret) {
+		/*
+		 * If returned error code is EADDRNOTAVAIL, then this
+		 * memory may no longer be in a usable state as security
+		 * state of the pages is unknown after this failure. This
+		 * memory can neither be added back to the pool nor buddy
+		 * system.
+		 */
+		if (ret == -EADDRNOTAVAIL)
+			pr_err("Failure to lock secure GPU memory 0x%llx bytes will not be recoverable\n",
+				size);
+
+		return ret;
 	}
-	return ret;
+
+	/* Set private bit for each sg to indicate that its secured */
+	for_each_sg(sgt->sgl, sg, sgt->nents, i)
+		SetPagePrivate(sg_page(sg));
+
+	return 0;
 }
 
-static int kgsl_unlock_sgt(struct sg_table *sgt)
+int kgsl_unlock_sgt(struct sg_table *sgt)
 {
 	int dest_perms = PERM_READ | PERM_WRITE | PERM_EXEC;
 	int source_vm = VMID_CP_PIXEL;
@@ -435,9 +529,14 @@ static int kgsl_unlock_sgt(struct sg_table *sgt)
 
 	ret = hyp_assign_table(sgt, &source_vm, 1, &dest_vm, &dest_perms, 1);
 
+	if (ret) {
+		pr_err("kgsl: hyp_assign_table failed ret: %d\n", ret);
+		return ret;
+	}
+
 	for_each_sg_page(sgt->sgl, &sg_iter, sgt->nents, 0)
 		ClearPagePrivate(sg_page_iter_page(&sg_iter));
-	return ret;
+	return 0;
 }
 
 static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
@@ -452,21 +551,22 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 
 		ret = kgsl_unlock_sgt(memdesc->sgt);
 		if (ret) {
-			pr_err("Secure buf unlock failed: gpuaddr: %llx size: %llx ret: %d\n",
-					memdesc->gpuaddr, memdesc->size, ret);
+			pr_err("Failure to unlock secure GPU memory 0x%llx. %llx bytes will not be recoverable\n",
+					memdesc->gpuaddr, memdesc->size);
+			return;
 		}
 
+		kgsl_pool_free_sgt(memdesc->sgt);
 		atomic_long_sub(memdesc->size, &kgsl_driver.stats.secure);
 	} else {
-		atomic_long_sub(memdesc->size, &kgsl_driver.stats.page_alloc);
-	}
-
-	/* Free pages using the pages array for non secure paged memory */
-	if (memdesc->pages != NULL)
+		atomic_long_add(memdesc->size,
+			&kgsl_driver.stats.page_free_pending);
+		/* Free pages using pages array for non secure paged memory */
 		kgsl_pool_free_pages(memdesc->pages, memdesc->page_count);
-	else
-		kgsl_pool_free_sgt(memdesc->sgt);
-
+		atomic_long_sub(memdesc->size, &kgsl_driver.stats.page_alloc);
+		atomic_long_sub(memdesc->size,
+			&kgsl_driver.stats.page_free_pending);
+	}
 }
 
 /*
@@ -524,7 +624,7 @@ static int kgsl_contiguous_vmfault(struct kgsl_memdesc *memdesc,
 	else if (ret == -EFAULT)
 		return VM_FAULT_SIGBUS;
 
-	memdesc->mapsize += PAGE_SIZE;
+	atomic64_add(PAGE_SIZE, &memdesc->mapsize);
 
 	return VM_FAULT_NOPAGE;
 }
@@ -543,6 +643,9 @@ static void kgsl_cma_coherent_free(struct kgsl_memdesc *memdesc)
 		} else
 			atomic_long_sub(memdesc->size,
 				&kgsl_driver.stats.coherent);
+
+		mod_node_page_state(page_pgdat(phys_to_page(memdesc->physaddr)),
+			NR_UNRECLAIMABLE_PAGES, -(memdesc->size >> PAGE_SHIFT));
 
 		dma_free_attrs(memdesc->dev, (size_t) memdesc->size,
 			memdesc->hostptr, memdesc->physaddr, attrs);
@@ -811,6 +914,8 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 	 * are allocated by kgsl. This helps with improving the vm fault
 	 * routine by finding the faulted page in constant time.
 	 */
+	if (!(memdesc->flags & KGSL_MEMFLAGS_SECURE))
+		atomic_long_add(size, &kgsl_driver.stats.page_alloc_pending);
 
 	memdesc->pages = kgsl_malloc(len_alloc * sizeof(struct page *));
 	memdesc->page_count = 0;
@@ -875,11 +980,18 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 			goto done;
 		}
 
-		ret = kgsl_lock_sgt(memdesc->sgt);
+		ret = kgsl_lock_sgt(memdesc->sgt, memdesc->size);
 		if (ret) {
 			sg_free_table(memdesc->sgt);
 			kfree(memdesc->sgt);
 			memdesc->sgt = NULL;
+
+			if (ret == -EADDRNOTAVAIL) {
+				kgsl_free(memdesc->pages);
+				memset(memdesc, 0, sizeof(*memdesc));
+				return ret;
+			}
+
 			goto done;
 		}
 
@@ -905,6 +1017,9 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 		&kgsl_driver.stats.page_alloc_max);
 
 done:
+	if (!(memdesc->flags & KGSL_MEMFLAGS_SECURE))
+		atomic_long_sub(size, &kgsl_driver.stats.page_alloc_pending);
+
 	if (ret) {
 		if (memdesc->pages) {
 			unsigned int count = 1;
@@ -957,8 +1072,8 @@ void kgsl_free_secure_page(struct page *page)
 	sg_init_table(&sgl, 1);
 	sg_set_page(&sgl, page, PAGE_SIZE, 0);
 
-	kgsl_unlock_sgt(&sgt);
-	__free_page(page);
+	if (!kgsl_unlock_sgt(&sgt))
+		__free_page(page);
 }
 
 struct page *kgsl_alloc_secure_page(void)
@@ -979,8 +1094,11 @@ struct page *kgsl_alloc_secure_page(void)
 	sg_init_table(&sgl, 1);
 	sg_set_page(&sgl, page, PAGE_SIZE, 0);
 
-	status = kgsl_lock_sgt(&sgt);
+	status = kgsl_lock_sgt(&sgt, PAGE_SIZE);
 	if (status) {
+		if (status == -EADDRNOTAVAIL)
+			return NULL;
+
 		__free_page(page);
 		return NULL;
 	}
@@ -1197,6 +1315,8 @@ int kgsl_sharedmem_alloc_contig(struct kgsl_device *device,
 	KGSL_STATS_ADD(size, &kgsl_driver.stats.coherent,
 		&kgsl_driver.stats.coherent_max);
 
+	mod_node_page_state(page_pgdat(phys_to_page(memdesc->physaddr)),
+			NR_UNRECLAIMABLE_PAGES, (size >> PAGE_SHIFT));
 err:
 	if (result)
 		kgsl_sharedmem_free(memdesc);
@@ -1312,6 +1432,9 @@ static int kgsl_cma_alloc_secure(struct kgsl_device *device,
 	/* Record statistics */
 	KGSL_STATS_ADD(aligned, &kgsl_driver.stats.secure,
 	       &kgsl_driver.stats.secure_max);
+
+	mod_node_page_state(page_pgdat(phys_to_page(memdesc->physaddr)),
+			NR_UNRECLAIMABLE_PAGES, (aligned >> PAGE_SHIFT));
 err:
 	if (result)
 		kgsl_sharedmem_free(memdesc);

@@ -368,8 +368,10 @@ int ovl_verify_origin(struct dentry *dentry, struct vfsmount *mnt,
 
 	fh = ovl_encode_fh(origin, is_upper);
 	err = PTR_ERR(fh);
-	if (IS_ERR(fh))
+	if (IS_ERR(fh)) {
+		fh = NULL;
 		goto fail;
+	}
 
 	err = ovl_verify_origin_fh(dentry, fh);
 	if (set && err == -ENODATA)
@@ -728,7 +730,7 @@ struct dentry *ovl_lookup(struct inode *dir, struct dentry *dentry,
 			ovl_set_flag(OVL_INDEX, inode);
 	}
 
-	revert_creds(old_cred);
+	ovl_revert_creds(old_cred);
 	dput(index);
 	kfree(stack);
 	kfree(d.redirect);
@@ -749,7 +751,7 @@ out_put_upper:
 	kfree(upperredirect);
 out:
 	kfree(d.redirect);
-	revert_creds(old_cred);
+	ovl_revert_creds(old_cred);
 	return ERR_PTR(err);
 }
 

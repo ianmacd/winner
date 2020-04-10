@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -185,12 +185,23 @@
 #define PM8150_SUBTYPE		0x1E
 #define PM8150L_SUBTYPE		0x1F
 #define PM8150B_SUBTYPE		0x20
+#define PM8150A_SUBTYPE		0x27
 
+/* PM6150 SUBTYPE */
 #define PM6150_SUBTYPE		0x28
 #define PM6150L_SUBTYPE		0x1F
 
+/* PME9205 SUBTYPE */
+#define PME9205_SUBTYPE		0x24
+
+/* PM6125 SUBTYPE */
+#define PM6125_SUBTYPE		0x2D
+
 /* PMI632 */
 #define PMI632_SUBTYPE	0x25
+
+/* PM8008 SUBTYPE */
+#define PM8008_SUBTYPE	0x2C
 
 /* PMI8998 REV_ID */
 #define PMI8998_V1P0_REV1	0x00
@@ -263,6 +274,29 @@
 #define PM8150L_V3P0_REV3	0x00
 #define PM8150L_V3P0_REV4	0x03
 
+/* PM8150A_REV_ID */
+#define PM8150A_V1P0_REV1	0x00
+#define PM8150A_V1P0_REV2	0x00
+#define PM8150A_V1P0_REV3	0x00
+#define PM8150A_V1P0_REV4	0x01
+
+#define PM8150A_V2P0_REV1	0x00
+#define PM8150A_V2P0_REV2	0x00
+#define PM8150A_V2P0_REV3	0x00
+#define PM8150A_V2P0_REV4	0x02
+
+/* PME9205_REV_ID */
+#define PME9205_V1P0_REV1	0x00
+#define PME9205_V1P0_REV2	0x00
+#define PME9205_V1P0_REV3	0x00
+#define PME9205_V1P0_REV4	0x01
+
+#define PME9205_V2P0_REV1	0x00
+#define PME9205_V2P0_REV2	0x00
+#define PME9205_V2P0_REV3	0x00
+#define PME9205_V2P0_REV4	0x02
+
+/* PM6150_REV_ID */
 #define PM6150_V1P0_REV1	0x00
 #define PM6150_V1P0_REV2	0x00
 #define PM6150_V1P0_REV3	0x00
@@ -277,6 +311,12 @@
 #define PM6150_V2P0_REV2	0x00
 #define PM6150_V2P0_REV3	0x00
 #define PM6150_V2P0_REV4	0x02
+
+/* PM6125_REV_ID */
+#define PM6125_V1P0_REV1	0x00
+#define PM6125_V1P0_REV2	0x00
+#define PM6125_V1P0_REV3	0x00
+#define PM6125_V1P0_REV4	0x01
 
 /* PMI8998 FAB_ID */
 #define PMI8998_FAB_ID_SMIC	0x11
@@ -295,6 +335,9 @@
 
 /* PMI8937 */
 #define PMI8937_SUBTYPE		0x37
+
+/* SMB1390 */
+#define SMB1390_SUBTYPE		0x23
 
 /* SMB1381 */
 #define SMB1381_SUBTYPE		0x17

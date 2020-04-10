@@ -983,7 +983,7 @@ static void muic_print_reg_info(struct work_struct *work)
 	struct sm5508_muic_usbsw *usbsw = container_of(work, struct sm5508_muic_usbsw, usb_work.work);
 	int dev1 = 0, dev2 = 0, dev3 = 0, vbus = 0, adc = 0, chg_type = 0, afc_status = 0;
 	int manual_sw1 = 0, manual_sw2 = 0, afc_ctrl = 0;
-
+	
 	wake_lock(&sm5508_irq_wakelock);
 
 	dev1 = sm5508_muic_read_byte(usbsw->client, SM5508_MUIC_REG_DEV_T1);

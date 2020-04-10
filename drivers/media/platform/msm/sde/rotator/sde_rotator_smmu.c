@@ -382,7 +382,7 @@ int sde_smmu_map_dma_buf(struct dma_buf *dma_buf,
 
 #if defined(CONFIG_DISPLAY_SAMSUNG)
 	if (sec_debug_is_enabled())
-		ss_smmu_debug_map(SMMU_NRT_ROTATOR_DEBUG, domain, NULL, table);
+		ss_smmu_debug_map(SMMU_NRT_ROTATOR_DEBUG, table);
 #endif
 	return 0;
 }
@@ -522,6 +522,9 @@ static int sde_smmu_fault_handler(struct iommu_domain *domain,
 			iova, flags);
 	SDEROT_ERR("SMMU device:%s", sde_smmu->dev->kobj.name);
 
+#if defined(CONFIG_DISPLAY_SAMSUNG)
+	ss_smmu_debug_log();
+#endif
 	/* generate dump, but no panic */
 	SDEROT_EVTLOG_TOUT_HANDLER("rot", "rot_dbg_bus", "vbif_dbg_bus");
 

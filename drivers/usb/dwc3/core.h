@@ -37,7 +37,11 @@
 
 #include <linux/phy/phy.h>
 #ifdef CONFIG_USB_CHARGING_EVENT
+#if defined(CONFIG_BATTERY_SAMSUNG_LEGO_STYLE)
+#include "../../battery/common/include/sec_charging_common.h"
+#else
 #include "../../battery_v2/include/sec_charging_common.h"
+#endif
 #endif
 
 #define DWC3_MSG_MAX	500
@@ -48,6 +52,7 @@
 #define DWC3_EP0_SETUP_SIZE	512
 #define DWC3_ENDPOINTS_NUM	32
 #define DWC3_XHCI_RESOURCES_NUM	2
+#define MAX_ERROR_RECOVERY_TRIES	3
 
 #define DWC3_SCRATCHBUF_SIZE	4096	/* each buffer is assumed to be 4KiB */
 #define DWC3_EVENT_BUFFERS_SIZE	4096
@@ -224,6 +229,7 @@
 /* Global User Control 1 Register */
 #define DWC3_GUCTL1_TX_IPGAP_LINECHECK_DIS	BIT(28)
 #define DWC3_GUCTL1_DEV_L1_EXIT_BY_HW	BIT(24)
+#define DWC3_GUCTL1_IP_GAP_ADD_ON(n)	(n << 21)
 
 /* Global Debug LTSSM Register */
 #define DWC3_GDBGLTSSM_LINKSTATE_MASK	(0xF << 22)
@@ -857,8 +863,9 @@ struct dwc3_scratchpad_array {
 #define DWC3_GSI_EVT_BUF_ALLOC			10
 #define DWC3_GSI_EVT_BUF_SETUP			11
 #define DWC3_GSI_EVT_BUF_CLEANUP		12
-#define DWC3_GSI_EVT_BUF_FREE			13
-#define DWC3_CONTROLLER_NOTIFY_CLEAR_DB		14
+#define DWC3_GSI_EVT_BUF_CLEAR			13
+#define DWC3_GSI_EVT_BUF_FREE			14
+#define DWC3_CONTROLLER_NOTIFY_CLEAR_DB		15
 
 #define MAX_INTR_STATS				10
 
@@ -1178,6 +1185,7 @@ struct dwc3 {
 
 	unsigned int		index;
 	void			*dwc_ipc_log_ctxt;
+	void			*dwc_dma_ipc_log_ctxt;
 	struct dwc3_gadget_events	dbg_gadget_events;
 	u32			xhci_imod_value;
 	int			core_id;
@@ -1209,6 +1217,7 @@ struct dwc3 {
 	struct work_struct      set_vbus_current_work;
 	int			vbus_current; /* 0 : 100mA, 1 : 500mA, 2: 900mA */
 #endif
+	int			retries_on_error;
 };
 
 #define work_to_dwc(w)		(container_of((w), struct dwc3, drd_work))

@@ -77,6 +77,7 @@ static int __cam_icp_acquire_dev_in_available(struct cam_context *ctx,
 		trace_cam_context_state("ICP", ctx);
 	}
 
+	CAM_INFO(CAM_ICP, "Acquired ctxt_id [%d] dev_name [%s]", ctx->ctx_id, ctx->dev_name);
 	return rc;
 }
 
@@ -91,6 +92,7 @@ static int __cam_icp_release_dev_in_acquired(struct cam_context *ctx,
 
 	ctx->state = CAM_CTX_AVAILABLE;
 	trace_cam_context_state("ICP", ctx);
+	CAM_INFO(CAM_ICP, "Released ctxt_id [%d] dev_name [%s]", ctx->ctx_id, ctx->dev_name);
 	return rc;
 }
 

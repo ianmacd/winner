@@ -183,6 +183,7 @@
 #define HW_SOC_ID_M8953		(293)
 #define GET_FEAT_VERSION_CMD	3
 
+/* spread out etm register write */
 #define etm_writel(etm, val, off)	\
 		   do {	  \
 			   writel_relaxed_no_log(val, etm->base + off);	\

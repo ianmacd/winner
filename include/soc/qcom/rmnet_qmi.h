@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -27,10 +27,12 @@ struct net_device *rmnet_get_rmnet_dev(void *port, u8 mux_id);
 void rmnet_reset_qmi_pt(void *port);
 void rmnet_init_qmi_pt(void *port, void *qmi);
 void rmnet_enable_all_flows(void *port);
+bool rmnet_all_flows_enabled(void *port);
 void rmnet_set_powersave_format(void *port);
 void rmnet_clear_powersave_format(void *port);
 void rmnet_get_packets(void *port, u64 *rx, u64 *tx);
 int rmnet_get_powersave_notif(void *port);
+struct net_device *rmnet_get_real_dev(void *port);
 #else
 static inline void *rmnet_get_qmi_pt(void *port)
 {
@@ -65,6 +67,11 @@ static inline void rmnet_enable_all_flows(void *port)
 {
 }
 
+static inline bool rmnet_all_flows_enabled(void *port)
+{
+	return true;
+}
+
 static inline void rmnet_set_port_format(void *port)
 {
 }
@@ -78,5 +85,9 @@ static inline int rmnet_get_powersave_notif(void *port)
 	return 0;
 }
 
+static inline struct net_device *rmnet_get_real_dev(void *port)
+{
+	return NULL;
+}
 #endif /* CONFIG_QCOM_QMI_RMNET */
 #endif /*_RMNET_QMI_H*/

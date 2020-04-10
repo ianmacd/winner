@@ -176,7 +176,7 @@
 #define PCA9468_REG_ADC_MODE			0x3F
 #define PCA9468_BIT_ADC_MODE			BIT(4)
 
-#define PCA9468_MAX_REGISTER			PCA9468_REG_ADC_MODE
+#define PCA9468_MAX_REGISTER			0x4F
 
 
 #define PCA9468_IIN_CFG_STEP			100000	// input current step, unit - uA
@@ -286,6 +286,7 @@ static int adc_gain[16] = { 0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, 
 #else
 #define PCA9468_PPS_PERIODIC_T	10000	// 10000ms
 #endif
+#define PCA9468_CVMODE_CHECK2_T	1000	// 1000ms
 
 /* Battery Threshold */
 #if defined(CONFIG_BATTERY_SAMSUNG)
@@ -346,7 +347,7 @@ static int adc_gain[16] = { 0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, 
 /* TA voltage threshold starting Adjust CC mode */
 #define PCA9468_TA_MIN_VOL_CCADJ	8500000	// 8000000uV-->8500000uV
 
-#define PCA9468_TA_VOL_PRE_OFFSET	500000	// 200000uV --> 500000uV
+#define PCA9468_TA_VOL_PRE_OFFSET	600000	// 200000uV --> 500000uV
 /* Adjust CC mode TA voltage step */
 #if defined(CONFIG_SEC_FACTORY)
 #define PCA9468_TA_VOL_STEP_ADJ_CC	80000	// 80000uV
@@ -367,6 +368,10 @@ static int adc_gain[16] = { 0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, 
 #define PCA9468_TA_MAX_VOL_CP		9800000	// 9760000uV --> 9800000uV
 /* maximum retry counter for restarting charging */
 #define PCA9468_MAX_RETRY_CNT		3		// 3times
+/* TA IIN tolerance */
+#define PCA9468_TA_IIN_OFFSET		100000	// 100mA
+/* IIN_CC upper protection offset in Power Limit Mode TA */
+#define PCA9468_IIN_CC_UPPER_OFFSET	150000	// 150mA
 
 /* PD Message Voltage and Current Step */
 #define PD_MSG_TA_VOL_STEP			20000	// 20mV
@@ -412,6 +417,7 @@ enum {
 	DC_STATE_ADJUST_TAVOL,	/* Adjust TA voltage to set new TA current under 1000mA input */
 
 	DC_STATE_ADJUST_TACUR,	/* Adjust TA current to set new TA current over 1000mA input */
+	DC_STATE_WC_CV_MODE,	/* Check WC(Wireless Charger) CV mode status */
 	DC_STATE_MAX,
 };
 
@@ -451,6 +457,7 @@ enum {
 
 	TIMER_ADJUST_TAVOL,
 	TIMER_ADJUST_TACUR,
+	TIMER_CHECK_WCCVMODE,
 };
 
 /* PD Message Type */
@@ -466,12 +473,20 @@ enum {
 	INC_TA_CUR, /* TA current increment */
 };
 
+/* TA Mode for the direct charging */
+enum {
+	TA_NO_DC_MODE,
+	TA_2TO1_DC_MODE,
+	TA_4TO1_DC_MODE,
+	WC_DC_MODE,
+};
+
 /* IIN offset as the switching frequency in uA*/
 static int iin_fsw_cfg[16] = { 9990, 10540, 11010, 11520, 12000, 12520, 12990, 13470,
 								5460, 6050, 6580, 7150, 7670, 8230, 8720, 9260 };
 
 struct pca9468_platform_data {
-	unsigned int	irq_gpio;	/* GPIO pin that's connected to INT# */
+	int	irq_gpio;	/* GPIO pin that's connected to INT# */
 	unsigned int	iin_cfg;	/* Input Current Limit - uA unit */
 	unsigned int 	ichg_cfg;	/* Charging Current - uA unit */
 	unsigned int	v_float;	/* V_Float Voltage - uV unit */
@@ -480,6 +495,7 @@ struct pca9468_platform_data {
 	unsigned int 	snsres;		/* Current sense resister, 0 - 5mOhm, 1 - 10mOhm */
 	unsigned int 	fsw_cfg; 	/* Switching frequency, refer to the datasheet, 0 - 833kHz, ... , 3 - 980kHz */
 	unsigned int	ntc_th;		/* NTC voltage threshold : 0~2.4V - uV unit */
+	unsigned int	ta_mode;	/* Default ta mode, 0 - No direct charging, 1 - 2:1 charging mode, 2 - 4:1 charging mode */
 #if defined(CONFIG_BATTERY_SAMSUNG)
 	int chgen_gpio;
 	char *sec_dc_name;
@@ -518,6 +534,7 @@ struct pca9468_platform_data {
  * @new_vfloat: New request vfloat, uV
  * @adc_comp_gain: adc gain for compensation
  * @retry_cnt: retry counter for re-starting charging if charging stop happens
+ * @ta_mode: ta mode that TA can support for the direct charging, 2:1 or 4:1 mode
  * @pdata: pointer to platform data
  * @debug_root: debug entry
  * @debug_address: debug register address
@@ -525,6 +542,7 @@ struct pca9468_platform_data {
 struct pca9468_charger {
 	struct wakeup_source	monitor_wake_lock;
 	struct mutex		lock;
+	struct mutex		i2c_lock;
 	struct device		*dev;
 	struct regmap		*regmap;
 #if defined(CONFIG_BATTERY_SAMSUNG)
@@ -569,6 +587,7 @@ struct pca9468_charger {
 	int					adc_comp_gain;
 
 	int					retry_cnt;
+	int		ta_mode;
 
 	struct pca9468_platform_data *pdata;
 

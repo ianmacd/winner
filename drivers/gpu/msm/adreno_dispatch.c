@@ -640,6 +640,17 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	secs = time.ktime;
 	nsecs = do_div(secs, 1000000000);
 
+	/*
+	 * For the first submission in any given command queue update the
+	 * expected expire time - this won't actually be used / updated until
+	 * the command queue in question goes current, but universally setting
+	 * it here avoids the possibilty of some race conditions with preempt
+	 */
+
+	if (dispatch_q->inflight == 1)
+		dispatch_q->expires = jiffies +
+			msecs_to_jiffies(adreno_drawobj_timeout);
+
 	trace_adreno_cmdbatch_submitted(drawobj, (int) dispatcher->inflight,
 		time.ticks, (unsigned long) secs, nsecs / 1000, drawctxt->rb,
 		adreno_get_rptr(drawctxt->rb));
@@ -651,17 +662,6 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	dispatch_q->cmd_q[dispatch_q->tail] = cmdobj;
 	dispatch_q->tail = (dispatch_q->tail + 1) %
 		ADRENO_DISPATCH_DRAWQUEUE_SIZE;
-
-	/*
-	 * For the first submission in any given command queue update the
-	 * expected expire time - this won't actually be used / updated until
-	 * the command queue in question goes current, but universally setting
-	 * it here avoids the possibilty of some race conditions with preempt
-	 */
-
-	if (dispatch_q->inflight == 1)
-		dispatch_q->expires = jiffies +
-			msecs_to_jiffies(adreno_drawobj_timeout);
 
 	/*
 	 * If we believe ourselves to be current and preemption isn't a thing,
@@ -1396,6 +1396,22 @@ int adreno_dispatcher_queue_cmds(struct kgsl_device_private *dev_priv,
 
 	user_ts = *timestamp;
 
+	/*
+	 * If there is only one drawobj in the array and it is of
+	 * type SYNCOBJ_TYPE, skip comparing user_ts as it can be 0
+	 */
+	if (!(count == 1 && drawobj[0]->type == SYNCOBJ_TYPE) &&
+		(drawctxt->base.flags & KGSL_CONTEXT_USER_GENERATED_TS)) {
+		/*
+		 * User specified timestamps need to be greater than the last
+		 * issued timestamp in the context
+		 */
+		if (timestamp_cmp(drawctxt->timestamp, user_ts) >= 0) {
+			spin_unlock(&drawctxt->lock);
+			return -ERANGE;
+		}
+	}
+
 	for (i = 0; i < count; i++) {
 
 		switch (drawobj[i]->type) {
@@ -1706,6 +1722,9 @@ static void adreno_fault_header(struct kgsl_device *device,
 	if (drawobj != NULL) {
 		struct adreno_context *drawctxt =
 			ADRENO_CONTEXT(drawobj->context);
+
+		drawctxt->base.total_fault_count++;
+		drawctxt->base.last_faulted_cmd_ts = drawobj->timestamp;
 
 		trace_adreno_gpu_fault(drawobj->context->id,
 			drawobj->timestamp,
@@ -2093,8 +2112,24 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	if (fault == 0)
 		return 0;
 
+	mutex_lock(&device->mutex);
+
+	/*
+	 * In the very unlikely case that the power is off, do nothing - the
+	 * state will be reset on power up and everybody will be happy
+	 */
+	if (!kgsl_state_is_awake(device)) {
+		mutex_unlock(&device->mutex);
+		if (fault & ADRENO_SOFT_FAULT) {
+			/* Clear the existing register values */
+			memset(adreno_ft_regs_val, 0,
+				adreno_ft_regs_num * sizeof(unsigned int));
+		}
+		return 0;
+	}
+
 	/* Mask all GMU interrupts */
-	if (gmu_core_isenabled(device)) {
+	if (gmu_core_gpmu_isenabled(device)) {
 		adreno_write_gmureg(adreno_dev,
 			ADRENO_REG_GMU_AO_HOST_INTERRUPT_MASK,
 			0xFFFFFFFF);
@@ -2139,18 +2174,6 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 						 (unsigned long)ipafar);
 	}
 
-	/*
-	 * In the very unlikely case that the power is off, do nothing - the
-	 * state will be reset on power up and everybody will be happy
-	 */
-
-	if (!kgsl_state_is_awake(device) && (fault & ADRENO_SOFT_FAULT)) {
-		/* Clear the existing register values */
-		memset(adreno_ft_regs_val, 0,
-				adreno_ft_regs_num * sizeof(unsigned int));
-		WARN(1, "kgsl state %d fault %d\n", device->state, fault);
-		return 0;
-	}
 
 	/*
 	 * On A5xx and A6xx, read RBBM_STATUS3:SMMU_STALLED_ON_FAULT (BIT 24)
@@ -2163,10 +2186,9 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 		gx_on) {
 		unsigned int val;
 
-		mutex_lock(&device->mutex);
 		adreno_readreg(adreno_dev, ADRENO_REG_RBBM_STATUS3, &val);
-		mutex_unlock(&device->mutex);
 		if (val & BIT(24)) {
+			mutex_unlock(&device->mutex);
 			WARN(1, "MMU is stuck %x\n", val);
 			return 0;
 		}
@@ -2181,8 +2203,6 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	 */
 	if (adreno_is_preemption_enabled(adreno_dev))
 		del_timer_sync(&adreno_dev->preempt.timer);
-
-	mutex_lock(&device->mutex);
 
 	if (gx_on)
 		adreno_readreg64(adreno_dev, ADRENO_REG_CP_RB_BASE,
@@ -2284,14 +2304,6 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	}
 
 	atomic_add(halt, &adreno_dev->halt);
-
-	/*
-	 * At this point it is safe to assume that we recovered. Setting
-	 * this field allows us to take a new snapshot for the next failure
-	 * if we are prioritizing the first unrecoverable snapshot.
-	 */
-	if (device->snapshot)
-		device->snapshot->recovered = true;
 
 	return 1;
 }

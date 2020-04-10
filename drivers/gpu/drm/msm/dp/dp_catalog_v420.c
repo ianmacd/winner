@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -31,9 +31,9 @@
 
 #ifndef CONFIG_SEC_DISPLAYPORT
 static u8 const vm_pre_emphasis[MAX_VOLTAGE_LEVELS][MAX_PRE_EMP_LEVELS] = {
-	{0x00, 0x0B, 0x14, 0xFF},       /* pe0, 0 db */
-	{0x00, 0x0B, 0x12, 0xFF},       /* pe1, 3.5 db */
-	{0x00, 0x0B, 0xFF, 0xFF},       /* pe2, 6.0 db */
+	{0x00, 0x0E, 0x16, 0xFF},       /* pe0, 0 db */
+	{0x00, 0x0E, 0x16, 0xFF},       /* pe1, 3.5 db */
+	{0x00, 0x0E, 0xFF, 0xFF},       /* pe2, 6.0 db */
 	{0xFF, 0xFF, 0xFF, 0xFF}        /* pe3, 9.5 db */
 };
 
@@ -41,7 +41,7 @@ static u8 const vm_pre_emphasis[MAX_VOLTAGE_LEVELS][MAX_PRE_EMP_LEVELS] = {
 static u8 const vm_voltage_swing[MAX_VOLTAGE_LEVELS][MAX_PRE_EMP_LEVELS] = {
 	{0x07, 0x0F, 0x16, 0xFF}, /* sw0, 0.4v  */
 	{0x11, 0x1E, 0x1F, 0xFF}, /* sw1, 0.6 v */
-	{0x19, 0x1F, 0xFF, 0xFF}, /* sw1, 0.8 v */
+	{0x1A, 0x1F, 0xFF, 0xFF}, /* sw1, 0.8 v */
 	{0xFF, 0xFF, 0xFF, 0xFF}  /* sw1, 1.2 v, optional */
 };
 #else
@@ -137,6 +137,34 @@ static void dp_catalog_aux_setup_v420(struct dp_catalog_aux *aux,
 
 	dp_write(catalog->exe_mode, io_data, DP_PHY_AUX_INTERRUPT_MASK_V420,
 			0x1F);
+}
+
+static void dp_catalog_aux_clear_hw_interrupts_v420(struct dp_catalog_aux *aux)
+{
+	struct dp_catalog_private_v420 *catalog;
+	struct dp_io_data *io_data;
+	u32 data = 0;
+
+	if (!aux) {
+		pr_err("invalid input\n");
+		return;
+	}
+
+	catalog = dp_catalog_get_priv_v420(aux);
+	io_data = catalog->io->dp_phy;
+
+	data = dp_read(catalog->exe_mode, io_data,
+		DP_PHY_AUX_INTERRUPT_STATUS_V420);
+
+	dp_write(catalog->exe_mode, io_data,
+		DP_PHY_AUX_INTERRUPT_CLEAR_V420, 0x1f);
+	wmb(); /* make sure 0x1f is written before next write */
+	dp_write(catalog->exe_mode, io_data,
+		DP_PHY_AUX_INTERRUPT_CLEAR_V420, 0x9f);
+	wmb(); /* make sure 0x9f is written before next write */
+	dp_write(catalog->exe_mode, io_data,
+		DP_PHY_AUX_INTERRUPT_CLEAR_V420, 0);
+	wmb(); /* make sure register is cleared */
 }
 
 static void dp_catalog_panel_config_msa_v420(struct dp_catalog_panel *panel,
@@ -248,6 +276,21 @@ static void dp_catalog_ctrl_update_vx_px_v420(struct dp_catalog_ctrl *ctrl,
 
 	value0 = vm_voltage_swing[v_level][p_level];
 	value1 = vm_pre_emphasis[v_level][p_level];
+#ifdef SECDP_SELF_TEST
+	if (secdp_self_test_status(ST_VOLTAGE_TUN) >= 0) {
+		u8 val = secdp_self_test_get_arg(ST_VOLTAGE_TUN)[v_level*4 + p_level];
+
+		pr_info("value0 : 0x%02d => 0x%02d\n", value0, val);
+		value0 = val;
+	}
+
+	if (secdp_self_test_status(ST_PREEM_TUN) >= 0) {
+		u8 val = secdp_self_test_get_arg(ST_PREEM_TUN)[v_level*4 + p_level];
+		
+		pr_info("value0 : 0x%02d => 0x%02d\n", value1, val);
+		value1 = val;
+	}
+#endif
 
 	/* program default setting first */
 	io_data = catalog->io->dp_ln_tx0;
@@ -282,6 +325,30 @@ static void dp_catalog_ctrl_update_vx_px_v420(struct dp_catalog_ctrl *ctrl,
 		pr_err("invalid vx (0x%x=0x%x), px (0x%x=0x%x\n",
 			v_level, value0, p_level, value1);
 	}
+}
+
+static void dp_catalog_ctrl_lane_pnswap_v420(struct dp_catalog_ctrl *ctrl,
+						u8 ln_pnswap)
+{
+	struct dp_catalog_private_v420 *catalog;
+	struct dp_io_data *io_data;
+	u32 cfg0, cfg1;
+
+	catalog = dp_catalog_get_priv_v420(ctrl);
+
+	cfg0 = 0x0a;
+	cfg1 = 0x0a;
+
+	cfg0 |= ((ln_pnswap >> 0) & 0x1) << 0;
+	cfg0 |= ((ln_pnswap >> 1) & 0x1) << 2;
+	cfg1 |= ((ln_pnswap >> 2) & 0x1) << 0;
+	cfg1 |= ((ln_pnswap >> 3) & 0x1) << 2;
+
+	io_data = catalog->io->dp_ln_tx0;
+	dp_write(catalog->exe_mode, io_data, TXn_TX_POL_INV_V420, cfg0);
+
+	io_data = catalog->io->dp_ln_tx1;
+	dp_write(catalog->exe_mode, io_data, TXn_TX_POL_INV_V420, cfg1);
 }
 
 #ifdef SECDP_CALIBRATE_VXPX
@@ -423,9 +490,12 @@ int dp_catalog_get_v420(struct device *dev, struct dp_catalog *catalog,
 	catalog->priv.set_exe_mode = dp_catalog_set_exe_mode_v420;
 
 	catalog->aux.setup         = dp_catalog_aux_setup_v420;
+	catalog->aux.clear_hw_interrupts =
+				dp_catalog_aux_clear_hw_interrupts_v420;
 	catalog->panel.config_msa  = dp_catalog_panel_config_msa_v420;
 	catalog->ctrl.phy_lane_cfg = dp_catalog_ctrl_phy_lane_cfg_v420;
 	catalog->ctrl.update_vx_px = dp_catalog_ctrl_update_vx_px_v420;
+	catalog->ctrl.lane_pnswap = dp_catalog_ctrl_lane_pnswap_v420;
 
 	/* Set the default execution mode to hardware mode */
 	dp_catalog_set_exe_mode_v420(catalog, "hw");

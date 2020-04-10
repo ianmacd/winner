@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -64,8 +64,12 @@ struct pil_desc {
 	bool signal_aop;
 	struct mbox_client cl;
 	struct mbox_chan *mbox;
-	struct md_ss_toc *minidump;
+	struct md_ss_toc *minidump_ss;
+	struct md_ss_toc **aux_minidump;
 	int minidump_id;
+	int *aux_minidump_ids;
+	int num_aux_minidump_ids;
+	bool minidump_as_elf32;
 };
 
 /**

@@ -22,7 +22,12 @@
 #define VIDC_DBG_LABEL "msm_vidc"
 #endif
 
-#define VIDC_DBG_SESSION_RATELIMIT_INTERVAL 1
+/*
+ * This enforces a rate limit: not more than 6 messages
+ * in every 1s.
+ */
+
+#define VIDC_DBG_SESSION_RATELIMIT_INTERVAL (1 * HZ)
 #define VIDC_DBG_SESSION_RATELIMIT_BURST 6
 
 #define VIDC_DBG_TAG VIDC_DBG_LABEL ": %4s: "
@@ -79,7 +84,7 @@ extern bool msm_vidc_syscache_disable;
 	do { \
 		if (msm_vidc_debug & __level) { \
 			if (msm_vidc_debug_out == VIDC_OUT_PRINTK && \
-					check_ratelimit()) { \
+					msm_vidc_check_ratelimit()) { \
 				pr_info(VIDC_DBG_TAG __fmt, \
 					get_debug_level_str(__level),	\
 					## arg); \
@@ -102,7 +107,7 @@ struct dentry *msm_vidc_debugfs_init_inst(struct msm_vidc_inst *inst,
 void msm_vidc_debugfs_deinit_inst(struct msm_vidc_inst *inst);
 void msm_vidc_debugfs_update(struct msm_vidc_inst *inst,
 		enum msm_vidc_debugfs_event e);
-int check_ratelimit(void);
+int msm_vidc_check_ratelimit(void);
 
 static inline char *get_debug_level_str(int level)
 {

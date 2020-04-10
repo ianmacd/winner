@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2017, The Linux Foundation. All rights reserved.
+Copyright (c) 2017, 2019 The Linux Foundation. All rights reserved.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License version 2 and
@@ -40,6 +40,18 @@ static inline void msm_mdf_exit(void)
 	return;
 }
 #endif
+#ifdef CONFIG_XT_LOGGING
+int spk_params_init(void);
+void spk_params_exit(void);
+#else
+static inline int spk_params_init(void)
+{
+	return 0;
+}
+static inline void spk_params_exit(void)
+{
+}
+#endif
 #ifdef CONFIG_SEC_SND_ADAPTATION
 int sec_soc_platform_init(void);
 #endif
@@ -60,5 +72,19 @@ void adsp_err_exit(void);
 void sec_soc_platform_exit(void);
 #endif
 
+#ifdef CONFIG_VOICE_MHI
+int voice_mhi_init(void);
+void voice_mhi_exit(void);
+#else
+static inline int voice_mhi_init(void)
+{
+	return 0;
+}
+
+static inline void voice_mhi_exit(void)
+{
+	return;
+}
+#endif
 #endif
 

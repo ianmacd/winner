@@ -35,9 +35,6 @@
 #include "pcm.h"
 #include "clock.h"
 #include "power.h"
-#if defined(CONFIG_USB_NOTIFY_LAYER)
-#include <linux/usb_notify.h>
-#endif
 
 #define SUBSTREAM_FLAG_DATA_EP_STARTED	0
 #define SUBSTREAM_FLAG_SYNC_EP_STARTED	1
@@ -379,6 +376,9 @@ static int search_roland_implicit_fb(struct usb_device *dev, int ifnum,
 	return 0;
 }
 
+/* Setup an implicit feedback endpoint from a quirk. Returns 0 if no quirk
+ * applies. Returns 1 if a quirk was found.
+ */
 static int set_sync_ep_implicit_fb_quirk(struct snd_usb_substream *subs,
 					 struct usb_device *dev,
 					 struct usb_interface_descriptor *altsd,
@@ -457,7 +457,7 @@ add_sync_ep:
 
 	subs->data_endpoint->sync_master = subs->sync_endpoint;
 
-	return 0;
+	return 1;
 }
 
 static int set_sync_endpoint(struct snd_usb_substream *subs,
@@ -495,6 +495,10 @@ static int set_sync_endpoint(struct snd_usb_substream *subs,
 	err = set_sync_ep_implicit_fb_quirk(subs, dev, altsd, attr);
 	if (err < 0)
 		return err;
+
+	/* endpoint set by quirk */
+	if (err > 0)
+		return 0;
 
 	if (altsd->bNumEndpoints < 2)
 		return 0;
@@ -607,13 +611,6 @@ static int set_format(struct snd_usb_substream *subs, struct audioformat *fmt)
 			dev_err(&dev->dev,
 				"%d:%d: usb_set_interface failed (%d)\n",
 				fmt->iface, fmt->altsetting, err);
-#if defined(CONFIG_USB_NOTIFY_LAYER)
-			if (err == -ETIMEDOUT) {
-				// add work around code for timeout error
-				// restart the usb host and vbus power off and on.
-				usb_otg_restart_accessory(dev);
-			}
-#endif
 			return -EIO;
 		}
 		dev_dbg(&dev->dev, "setting usb interface %d:%d\n",

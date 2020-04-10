@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  * Copyright (C) 2014 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
@@ -24,10 +24,10 @@
 #include "msm_gem.h"
 #include "msm_fence.h"
 #include "sde_trace.h"
-#include "sde_dbg.h"
 
 #define MULTIPLE_CONN_DETECTED(x) (x > 1)
-
+extern int smmu_fault_rec;
+extern int err_flag;
 struct msm_commit {
 	struct drm_device *dev;
 	struct drm_atomic_state *state;
@@ -131,7 +131,8 @@ static inline bool _msm_seamless_for_crtc(struct drm_atomic_state *state,
 	int conn_cnt = 0;
 
 	if (msm_is_mode_seamless(&crtc_state->mode) ||
-		msm_is_mode_seamless_vrr(&crtc_state->adjusted_mode))
+		msm_is_mode_seamless_vrr(&crtc_state->adjusted_mode) ||
+		msm_is_mode_seamless_dyn_clk(&crtc_state->adjusted_mode))
 		return true;
 
 	if (msm_is_mode_seamless_dms(&crtc_state->adjusted_mode) && !enable)
@@ -175,6 +176,10 @@ static inline bool _msm_seamless_for_conn(struct drm_connector *connector,
 			&connector->encoder->crtc->state->adjusted_mode))
 		return true;
 
+	if (msm_is_mode_seamless_dyn_clk(
+			 &connector->encoder->crtc->state->adjusted_mode))
+		return true;
+
 	if (msm_is_mode_seamless_dms(
 			&connector->encoder->crtc->state->adjusted_mode))
 		return true;
@@ -196,7 +201,12 @@ static void msm_atomic_wait_for_commit_done(
 		if (!new_crtc_state->active)
 			continue;
 
+		if (drm_crtc_vblank_get(crtc))
+			continue;
+
 		kms->funcs->wait_for_crtc_commit_done(kms, crtc);
+
+		drm_crtc_vblank_put(crtc);
 	}
 }
 
@@ -576,7 +586,15 @@ static void complete_commit(struct msm_commit *c)
 
 	pr_debug("%s ++ \n", __func__);
 
-	SDE_EVT32(state, ((unsigned long long)state) >> 32);
+	if (smmu_fault_rec) {
+		while (1)
+			msleep(20);
+	}
+	if (err_flag) {
+		while (1)
+			msleep(20);
+	}
+
 	drm_atomic_helper_wait_for_fences(dev, state, false);
 
 	kms->funcs->prepare_commit(kms, state);

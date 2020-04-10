@@ -30,7 +30,6 @@ DEFINE_DLOG(dlog_mm);
 DEFINE_DLOG(dlog_efs);
 DEFINE_DLOG(dlog_etc);
 DEFINE_DLOG(dlog_rmdir);
-DEFINE_DLOG(dlog_security);
 
 #define EXT_SHIFT		7
 #define MAX_EXT			(1 << 7)
@@ -61,8 +60,7 @@ enum {
 	DLOG_MM = 0,
 	DLOG_EFS,
 	DLOG_ETC,
-	DLOG_RMDIR,
-	DLOG_SECURITY
+	DLOG_RMDIR
 };
 
 static struct dlog_keyword_hash_tbl ht[DLOG_HT_MAX];
@@ -96,8 +94,9 @@ static const char *extensions[] = {
 	"dotx",	"htm", "html", "hwdt", "hwp",
 	"hwpx",	"hwt", "memo", "pdf", "pot",
 	"potx",	"pps", "ppsx", "ppt", "pptm",
-	"pptx",	"rtf", "snb", "spd", "xls",
-	"xlsm", "xlsx", "xlt", "xltx", "xml",
+	"pptx",	"rtf", "sdoc", "snb", "spd",
+	"xls", "xlsm", "xlsx", "xlt", "xltx",
+	"xml",
 	NULL,
 };
 
@@ -247,6 +246,9 @@ static void store_log(struct dentry *dentry, struct inode *inode,
 	}
 
 	full_path = dentry_path_raw(dentry, buf, PATH_MAX);
+	if (IS_ERR(full_path))
+		goto out;
+
 	make_prefix(part_id, &prefix);
 	if (isize >> 10) {
 		isize >>= 10;
@@ -338,11 +340,6 @@ void dlog_hook_rmdir(struct dentry *dentry, struct path *path)
 	store_log(dentry, NULL, path, DLOG_RMDIR, part_id);
 
 	return;
-}
-
-void dlog_hook_security(struct inode *inode)
-{
-	fslog_dlog_security("%lu", inode->i_ino); 
 }
 
 MODULE_LICENSE("GPL");

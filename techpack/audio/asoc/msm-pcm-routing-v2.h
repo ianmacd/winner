@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -249,6 +249,8 @@ enum {
 	MSM_FRONTEND_DAI_MULTIMEDIA27,
 	MSM_FRONTEND_DAI_MULTIMEDIA28,
 	MSM_FRONTEND_DAI_MULTIMEDIA29,
+	MSM_FRONTEND_DAI_MULTIMEDIA30,
+	MSM_FRONTEND_DAI_MULTIMEDIA31,
 	MSM_FRONTEND_DAI_VOIP,
 	MSM_FRONTEND_DAI_AFE_RX,
 	MSM_FRONTEND_DAI_AFE_TX,
@@ -270,8 +272,8 @@ enum {
 	MSM_FRONTEND_DAI_MAX,
 };
 
-#define MSM_FRONTEND_DAI_MM_SIZE (MSM_FRONTEND_DAI_MULTIMEDIA29 + 1)
-#define MSM_FRONTEND_DAI_MM_MAX_ID MSM_FRONTEND_DAI_MULTIMEDIA29
+#define MSM_FRONTEND_DAI_MM_SIZE (MSM_FRONTEND_DAI_MULTIMEDIA31 + 1)
+#define MSM_FRONTEND_DAI_MM_MAX_ID MSM_FRONTEND_DAI_MULTIMEDIA31
 
 enum {
 	MSM_BACKEND_DAI_PRI_I2S_RX = 0,
@@ -601,5 +603,6 @@ int msm_pcm_routing_get_pp_ch_cnt(int fe_id, int session_type);
 #ifdef CONFIG_SEC_SND_ADAPTATION
 int q6audio_get_copp_idx_from_port_id(int port_id, int func_type,
 	int sb_val, int *copp_idx);
+int sec_get_copp_idx(int port_id, int func_type);
 #endif
 #endif /*_MSM_PCM_H*/

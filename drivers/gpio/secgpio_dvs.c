@@ -405,23 +405,34 @@ static ssize_t secgpio_checked_sleepgpio_read(
 		return snprintf(buf, PAGE_SIZE, "0");
 }
 
+static int requested_gpio=0;
+
 static ssize_t secgpio_read_request_gpio(
-        struct device *dev, struct device_attribute *attr, char *buf)
+		struct device *dev, struct device_attribute *attr, char *buf)
 {
-        struct gpio_dvs *gdvs = dev_get_drvdata(dev);
-	int val;
+	int ret, val;
+	val = -1;
 
-	val = gdvs->read_gpio(gdvs->requested_gpio);
-        if(val < 0)
-		return snprintf(buf, PAGE_SIZE, "Current gpio[%d] is in invalid range", gdvs->requested_gpio);
+	pr_err("%s: gpio[%d]\n",__func__,requested_gpio);
 
-        return snprintf(buf, PAGE_SIZE, "GPIO[%d] : [%u]", gdvs->requested_gpio, val);
+	ret = gpio_direction_input(requested_gpio);
+	if(ret){
+		pr_err("%s: gpio_direction_input failed\n",__func__);
+		goto gpio_read_failed;
+	}
+
+	val = gpio_get_value(requested_gpio);
+	if(val < 0){
+		pr_err("%s: gpio_get_value failed\n",__func__);
+	}
+
+gpio_read_failed:
+	return snprintf(buf, PAGE_SIZE, "GPIO[%d] : [%d]", requested_gpio, val);
 }
 
 static ssize_t secgpio_write_request_gpio(
-        struct device *dev, struct device_attribute *attr, const char *buf, size_t size)
+		struct device *dev, struct device_attribute *attr, const char *buf, size_t size)
 {
-	struct gpio_dvs *gdvs = dev_get_drvdata(dev);
         int gpionum, ret;
 
 	ret = sscanf(buf, "%d", &gpionum);
@@ -430,7 +441,7 @@ static ssize_t secgpio_write_request_gpio(
                 return size;
 	}
 
-	gdvs->requested_gpio = gpionum;
+	requested_gpio = gpionum;
 
 	pr_info("[secgpio_dvs]%s: requested_gpio: [%d] \n", __func__,gpionum);
 	return size;

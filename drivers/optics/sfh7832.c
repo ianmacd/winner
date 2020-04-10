@@ -22,7 +22,7 @@
 #define SFHXXXX_CHIP_NAME	"SFHXXXX"
 
 #define VERSION				"1"
-#define SUB_VERSION			"26"
+#define SUB_VERSION			"28"
 #define VENDOR_VERSION		"o"
 
 #define MODULE_NAME_HRM		"hrm_sensor"
@@ -57,7 +57,7 @@ static void sfh7832_debug_var(struct sfh7832_device_data *data)
 	HRM_dbg("%s pin_hrm_int %d\n", __func__, data->pin_hrm_int);
 	HRM_dbg("%s pin_hrm_en %d\n", __func__, data->pin_hrm_en);
 	HRM_dbg("%s hrm_irq %d\n", __func__, data->hrm_irq);
-	HRM_dbg("%s irq_state %d\n", __func__, data->irq_state);
+	HRM_dbg("%s irq_state %d\n", __func__, atomic_read(&sfh7832_data->irq_state));
 	HRM_dbg("%s led_current %d\n", __func__, data->led_current);
 	HRM_dbg("%s xtalk_code %d\n", __func__, data->xtalk_code);
 	HRM_dbg("%s hrm_threshold %d\n", __func__, data->hrm_threshold);
@@ -3396,20 +3396,20 @@ int sfh7832_read_data(struct output_data *data)
 
 static void sfh7832_irq_set_state(int irq_enable)
 {
+	int irq_cnt = atomic_read(&sfh7832_data->irq_state);
 	HRM_info("%s - irq_enable : %d, irq_state : %d\n",
-		 __func__, irq_enable, sfh7832_data->irq_state);
+		 __func__, irq_enable, irq_cnt);
 
 	if (irq_enable) {
-		if (sfh7832_data->irq_state++ == 0) {
+ 		if (atomic_inc_return(&sfh7832_data->irq_state) == 1)
 			enable_irq(sfh7832_data->hrm_irq);
-		}
+ 		else
+ 			atomic_dec(&sfh7832_data->irq_state);
 	} else {
-		if (sfh7832_data->irq_state == 0)
-			return;
-		if (--sfh7832_data->irq_state <= 0) {
+ 		if (atomic_dec_return(&sfh7832_data->irq_state) == 0)
 			disable_irq_nosync(sfh7832_data->hrm_irq);
-			sfh7832_data->irq_state = 0;
-		}
+ 		else
+ 			atomic_inc(&sfh7832_data->irq_state);
 	}
 }
 
@@ -3714,6 +3714,10 @@ void sfh7832_set_mode(int onoff, enum op_mode mode)
 		sfh7832_data->enabled_mode = 0;
 		sfh7832_data->mode_sdk_enabled = 0;
 		sfh7832_data->mode_svc_enabled = 0;
+		sfh7832_data->ioffset_led1 = 0;
+		sfh7832_data->ioffset_led2 = 0;
+		sfh7832_data->ioffset_led3 = 0;
+		sfh7832_data->ioffset_led4 = 0;
 		sfh7832_irq_set_state(PWR_OFF);
 		sfh7832_pin_control(PWR_OFF);
 
@@ -4822,6 +4826,8 @@ static int sfh7832_setup_irq(void)
 		errorno = -ENODEV;
 		return errorno;
 	}
+	disable_irq_nosync(sfh7832_data->hrm_irq);
+
 	if (!IS_ERR_OR_NULL(sfh7832_data->pins_sleep)) {
 		status = pinctrl_select_state(sfh7832_data->hrm_pinctrl,
 						  sfh7832_data->pins_sleep);
@@ -4847,7 +4853,6 @@ static void sfh7832_init_var1(void)
 	sfh7832_data->mode_sdk_enabled = 0;
 	sfh7832_data->mode_svc_enabled = 0;
 	sfh7832_data->regulator_state = 0;
-	sfh7832_data->irq_state = 0;
 	sfh7832_data->hrm_threshold = DEFAULT_THRESHOLD;
 	sfh7832_data->eol_test_is_enable = 0;
 	sfh7832_data->eol_test_status = 0;
@@ -4855,6 +4860,7 @@ static void sfh7832_init_var1(void)
 	sfh7832_data->reg_read_buf = 0;
 	sfh7832_data->lib_ver = NULL;
 	sfh7832_data->pm_state = PM_RESUME;
+	atomic_set(&sfh7832_data->irq_state, 0);
 }
 
 int sfh7832_init_var2(void)

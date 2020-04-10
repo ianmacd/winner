@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -38,7 +38,7 @@ struct dp_audio_private {
 	struct dp_panel *panel;
 
 	bool ack_enabled;
-	bool session_on;
+	atomic_t session_on;
 	bool engine_on;
 
 	u32 channels;
@@ -309,6 +309,11 @@ static void dp_audio_isrc_sdp(struct dp_audio_private *audio)
 
 static void dp_audio_setup_sdp(struct dp_audio_private *audio)
 {
+	if (!atomic_read(&audio->session_on)) {
+		pr_warn("session inactive\n");
+		return;
+	}
+
 	/* always program stream 0 first before actual stream cfg */
 	audio->catalog->stream_id = DP_STREAM_0;
 	audio->catalog->config_sdp(audio->catalog);
@@ -329,6 +334,11 @@ static void dp_audio_setup_acr(struct dp_audio_private *audio)
 {
 	u32 select = 0;
 	struct dp_catalog_audio *catalog = audio->catalog;
+
+	if (!atomic_read(&audio->session_on)) {
+		pr_warn("session inactive\n");
+		return;
+	}
 
 	switch (audio->dp_audio.bw_code) {
 	case DP_LINK_BW_1_62:
@@ -353,40 +363,18 @@ static void dp_audio_setup_acr(struct dp_audio_private *audio)
 	catalog->config_acr(catalog);
 }
 
-static void dp_audio_safe_to_exit_level(struct dp_audio_private *audio)
-{
-	struct dp_catalog_audio *catalog = audio->catalog;
-	u32 safe_to_exit_level = 0;
-
-	switch (audio->dp_audio.lane_count) {
-	case 1:
-		safe_to_exit_level = 14;
-		break;
-	case 2:
-		safe_to_exit_level = 8;
-		break;
-	case 4:
-		safe_to_exit_level = 5;
-		break;
-	default:
-		pr_debug("setting the default safe_to_exit_level = %u\n",
-				safe_to_exit_level);
-		safe_to_exit_level = 14;
-		break;
-	}
-
-	catalog->data = safe_to_exit_level;
-	catalog->safe_to_exit_level(catalog);
-}
-
 static void dp_audio_enable(struct dp_audio_private *audio, bool enable)
 {
 	struct dp_catalog_audio *catalog = audio->catalog;
 
+	audio->engine_on = enable;
+	if (!atomic_read(&audio->session_on)) {
+		pr_warn("session inactive. enable=%d\n", enable);
+		return;
+	}
+
 	catalog->data = enable;
 	catalog->enable(catalog);
-
-	audio->engine_on = enable;
 }
 
 static struct dp_audio_private *dp_audio_get_data(struct platform_device *pdev)
@@ -444,7 +432,6 @@ static int dp_audio_info_setup(struct platform_device *pdev,
 
 	dp_audio_setup_sdp(audio);
 	dp_audio_setup_acr(audio);
-	dp_audio_safe_to_exit_level(audio);
 	dp_audio_enable(audio, true);
 
 	mutex_unlock(&audio->ops_lock);
@@ -492,7 +479,7 @@ static int dp_audio_get_cable_status(struct platform_device *pdev, u32 vote)
 		goto end;
 	}
 
-	return audio->session_on;
+	return atomic_read(&audio->session_on);
 end:
 	return rc;
 }
@@ -771,7 +758,7 @@ static int dp_audio_on(struct dp_audio *dp_audio)
 
 	ext = &audio->ext_audio_data;
 
-	audio->session_on = true;
+	atomic_set(&audio->session_on, 1);
 
 	rc = dp_audio_config(audio, EXT_DISPLAY_CABLE_CONNECT);
 	if (rc)
@@ -804,7 +791,7 @@ static int dp_audio_off(struct dp_audio *dp_audio)
 	ext = &audio->ext_audio_data;
 
 #ifdef CONFIG_SEC_DISPLAYPORT
-	if (!audio->session_on) {
+	if (!atomic_read(&audio->session_on)) {
 		pr_info("dp audio already off\n");
 		return rc;
 	}
@@ -822,7 +809,7 @@ static int dp_audio_off(struct dp_audio *dp_audio)
 end:
 	dp_audio_config(audio, EXT_DISPLAY_CABLE_DISCONNECT);
 
-	audio->session_on = false;
+	atomic_set(&audio->session_on, 0);
 	audio->engine_on  = false;
 
 	dp_audio_deregister_ext_disp(audio);

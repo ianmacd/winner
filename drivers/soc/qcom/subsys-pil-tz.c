@@ -36,6 +36,9 @@
 #ifdef CONFIG_SENSORS_SSC
 #include <linux/adsp/ssc_ssr_reason.h>
 #endif
+#ifdef CONFIG_SUPPORT_AK0997X
+#include <linux/gpio.h>
+#endif
 
 #define XO_FREQ			19200000
 #define PROXY_TIMEOUT_MS	10000
@@ -59,7 +62,7 @@ struct reg_info {
 	struct regulator *reg;
 	int uV;
 	int uA;
-#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT)
+#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT) || defined(CONFIG_SEC_ZODIAC_PROJECT)
 	bool valid;
 #endif
 };
@@ -102,6 +105,7 @@ struct pil_tz_data {
 	int proxy_clk_count;
 	int smem_id;
 	void *ramdump_dev;
+	void *minidump_dev;
 	u32 pas_id;
 	u32 bus_client;
 	bool enable_bus_scaling;
@@ -315,7 +319,7 @@ static int of_read_regs(struct device *dev, struct reg_info **regs_ref,
 					      &reg_name);
 
 		regs[i].reg = devm_regulator_get(dev, reg_name);
-#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT)
+#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT) || defined(CONFIG_SEC_ZODIAC_PROJECT)
 		regs[i].valid = true;
 #endif
 		if (IS_ERR(regs[i].reg)) {
@@ -324,7 +328,7 @@ static int of_read_regs(struct device *dev, struct reg_info **regs_ref,
 			if (rc != -EPROBE_DEFER)
 				dev_err(dev, "Failed to get %s\n regulator",
 								reg_name);
-#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT)
+#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT) || defined(CONFIG_SEC_ZODIAC_PROJECT)
 			if (!strcmp(reg_name, "subsensor_vdd"))
 			{
 				regs[i].valid = false;
@@ -445,7 +449,7 @@ static int enable_regulators(struct pil_tz_data *d, struct device *dev,
 	int i, rc = 0;
 
 	for (i = 0; i < reg_count; i++) {
-#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT)
+#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT) || defined(CONFIG_SEC_ZODIAC_PROJECT)
 		if (!regs[i].valid) {
 			dev_err(dev, "reg[%d] invalid", i);
 			continue;
@@ -512,7 +516,7 @@ static void disable_regulators(struct pil_tz_data *d, struct reg_info *regs,
 	int i;
 
 	for (i = 0; i < reg_count; i++) {
-#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT)
+#if defined(CONFIG_SEC_WINNERLTE_PROJECT) || defined(CONFIG_SEC_WINNERX_PROJECT) || defined(CONFIG_SEC_ZODIAC_PROJECT)
 		if (!regs[i].valid)
 			continue;
 #endif
@@ -705,6 +709,22 @@ static int pil_auth_and_reset(struct pil_desc *pil)
 	if (rc)
 		return rc;
 
+#ifdef CONFIG_SUPPORT_AK0997X
+	if (d->subsys_desc.d_hall_rst_gpio > 0) {
+		usleep_range(5, 10);
+		gpio_set_value(d->subsys_desc.d_hall_rst_gpio, 0);
+		pr_info("%s, %s d_hall_rst_gpio(%d) value(%d)\n", __func__,
+			d->subsys_desc.name, d->subsys_desc.d_hall_rst_gpio,
+			gpio_get_value(d->subsys_desc.d_hall_rst_gpio));
+
+		usleep_range(5, 10);
+		gpio_set_value(d->subsys_desc.d_hall_rst_gpio, 1);
+		pr_info("%s, %s d_hall_rst_gpio(%d) value(%d)\n", __func__,
+			d->subsys_desc.name, d->subsys_desc.d_hall_rst_gpio,
+			gpio_get_value(d->subsys_desc.d_hall_rst_gpio));
+	}
+#endif
+
 	rc = prepare_enable_clocks(pil->dev, d->clks, d->clk_count);
 	if (rc)
 		goto err_clks;
@@ -847,8 +867,11 @@ static void log_failure_reason(const struct pil_tz_data *d)
 	pr_err("%s subsystem failure reason: %s.\n", name, reason);
 
 #ifdef CONFIG_SENSORS_SSC
-	if (!strncmp(name, "slpi", 4))
+	if (!strncmp(name, "slpi", 4)) {
 		ssr_reason_call_back(reason, min(size, (size_t)MAX_SSR_REASON_LEN));
+		if (strstr(reason, "IPLSREVOCER"))
+			subsys_set_fssr(d->subsys, true);
+	}
 #endif
 }
 
@@ -896,7 +919,7 @@ static int subsys_ramdump(int enable, const struct subsys_desc *subsys)
 	if (!enable)
 		return 0;
 
-	return pil_do_ramdump(&d->desc, d->ramdump_dev, NULL);
+	return pil_do_ramdump(&d->desc, d->ramdump_dev, d->minidump_dev);
 }
 
 static void subsys_free_memory(const struct subsys_desc *subsys)
@@ -1066,6 +1089,7 @@ static int pil_tz_driver_probe(struct platform_device *pdev)
 	struct device_node *crypto_node;
 	u32 proxy_timeout, crypto_id;
 	int len, rc;
+	char md_node[20];
 
 	d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
 	if (!d)
@@ -1238,6 +1262,16 @@ static int pil_tz_driver_probe(struct platform_device *pdev)
 		goto err_ramdump;
 	}
 
+	scnprintf(md_node, sizeof(md_node), "md_%s", d->subsys_desc.name);
+
+	d->minidump_dev = create_ramdump_device(md_node, &pdev->dev);
+	if (!d->minidump_dev) {
+		pr_err("%s: Unable to create a %s minidump device.\n",
+				__func__, d->subsys_desc.name);
+		rc = -ENOMEM;
+		goto err_minidump;
+	}
+
 	d->subsys = subsys_register(&d->subsys_desc);
 	if (IS_ERR(d->subsys)) {
 		rc = PTR_ERR(d->subsys);
@@ -1246,6 +1280,8 @@ static int pil_tz_driver_probe(struct platform_device *pdev)
 
 	return 0;
 err_subsys:
+	destroy_ramdump_device(d->minidump_dev);
+err_minidump:
 	destroy_ramdump_device(d->ramdump_dev);
 err_ramdump:
 	pil_desc_release(&d->desc);
@@ -1260,6 +1296,7 @@ static int pil_tz_driver_exit(struct platform_device *pdev)
 
 	subsys_unregister(d->subsys);
 	destroy_ramdump_device(d->ramdump_dev);
+	destroy_ramdump_device(d->minidump_dev);
 	pil_desc_release(&d->desc);
 
 	return 0;

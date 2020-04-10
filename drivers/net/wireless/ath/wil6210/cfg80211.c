@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2012-2017 Qualcomm Atheros, Inc.
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -65,6 +65,19 @@ static struct ieee80211_channel wil_60ghz_channels[] = {
 	CHAN60G(4, 0),
 };
 
+static void
+wil_memdup_ie(u8 **pdst, size_t *pdst_len, const u8 *src, size_t src_len)
+{
+	kfree(*pdst);
+	*pdst = NULL;
+	*pdst_len = 0;
+	if (src_len > 0) {
+		*pdst = kmemdup(src, src_len, GFP_KERNEL);
+		if (*pdst)
+			*pdst_len = src_len;
+	}
+}
+
 struct wil_regd_2_brd_suffix {
 	const char regdomain[3]; /* alpha2 */
 	const char *brd_suffix;
@@ -101,6 +114,8 @@ enum wil_nl_60g_evt_type {
 
 enum wil_nl_60g_debug_cmd {
 	NL_60G_DBG_FORCE_WMI_SEND,
+	NL_60G_GEN_RADAR_ALLOC_BUFFER,
+	NL_60G_GEN_FW_RESET,
 };
 
 struct wil_nl_60g_send_receive_wmi {
@@ -904,6 +919,16 @@ out:
 	return rc;
 }
 
+static bool wil_is_safe_switch(enum nl80211_iftype from,
+			       enum nl80211_iftype to)
+{
+	if (from == NL80211_IFTYPE_STATION &&
+	    to == NL80211_IFTYPE_P2P_CLIENT)
+		return true;
+
+	return false;
+}
+
 static int wil_cfg80211_change_iface(struct wiphy *wiphy,
 				     struct net_device *ndev,
 				     enum nl80211_iftype type,
@@ -929,7 +954,8 @@ static int wil_cfg80211_change_iface(struct wiphy *wiphy,
 	 * because it can cause significant disruption
 	 */
 	if (!wil_has_other_active_ifaces(wil, ndev, true, false) &&
-	    netif_running(ndev) && !wil_is_recovery_blocked(wil)) {
+	    netif_running(ndev) && !wil_is_recovery_blocked(wil) &&
+	    !wil_is_safe_switch(wdev->iftype, type)) {
 		wil_dbg_misc(wil, "interface is up. resetting...\n");
 		mutex_lock(&wil->mutex);
 		__wil_down(wil);
@@ -1554,7 +1580,12 @@ int wil_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 			     params->wait);
 
 out:
+	/* when the sent packet was not acked by receiver(ACK=0), rc will
+	 * be -EAGAIN. In this case this function needs to return success,
+	 * the ACK=0 will be reflected in tx_status.
+	 */
 	tx_status = (rc == 0);
+	rc = (rc == -EAGAIN) ? 0 : rc;
 	cfg80211_mgmt_tx_status(wdev, cookie ? *cookie : 0, buf, len,
 				tx_status, GFP_KERNEL);
 
@@ -1734,11 +1765,19 @@ static int wil_cfg80211_add_key(struct wiphy *wiphy,
 
 	rc = wmi_add_cipher_key(vif, key_index, mac_addr, params->key_len,
 				params->key, key_usage);
-	if (!rc && !IS_ERR(cs))
+	if (!rc && !IS_ERR(cs)) {
+		/* update local storage used for AP recovery */
+		if (key_usage == WMI_KEY_USE_TX_GROUP && params->key &&
+		    params->key_len <= WMI_MAX_KEY_LEN) {
+			vif->gtk_index = key_index;
+			memcpy(vif->gtk, params->key, params->key_len);
+			vif->gtk_len = params->key_len;
+		}
 		/* in FT set crypto will take place upon receiving
 		 * WMI_RING_EN_EVENTID event
 		 */
 		wil_set_crypto_rx(key_index, key_usage, cs, params);
+	}
 
 	return rc;
 }
@@ -1871,7 +1910,7 @@ static int _wil_cfg80211_merge_extra_ies(const u8 *ies1, u16 ies1_len,
 		memcpy(buf, ies1, ies1_len);
 	dpos = buf + ies1_len;
 	spos = ies2;
-	while (spos + 1 < ies2 + ies2_len) {
+	while (spos && (spos + 1 < ies2 + ies2_len)) {
 		/* IE tag at offset 0, length at offset 1 */
 		u16 ielen = 2 + spos[1];
 
@@ -1934,6 +1973,14 @@ static int _wil_cfg80211_set_ies(struct wil6210_vif *vif,
 	int rc;
 	u16 len = 0, proberesp_len = 0;
 	u8 *ies = NULL, *proberesp;
+
+	/* update local storage used for AP recovery */
+	wil_memdup_ie(&vif->proberesp, &vif->proberesp_len, bcon->probe_resp,
+		      bcon->probe_resp_len);
+	wil_memdup_ie(&vif->proberesp_ies, &vif->proberesp_ies_len,
+		      bcon->proberesp_ies, bcon->proberesp_ies_len);
+	wil_memdup_ie(&vif->assocresp_ies, &vif->assocresp_ies_len,
+		      bcon->assocresp_ies, bcon->assocresp_ies_len);
 
 	proberesp = _wil_cfg80211_get_proberesp_ies(bcon->probe_resp,
 						    bcon->probe_resp_len,
@@ -2036,6 +2083,9 @@ static int _wil_cfg80211_start_ap(struct wiphy *wiphy,
 	vif->channel = chan;
 	vif->hidden_ssid = hidden_ssid;
 	vif->pbss = pbss;
+	vif->bi = bi;
+	memcpy(vif->ssid, ssid, ssid_len);
+	vif->ssid_len = ssid_len;
 
 	netif_carrier_on(ndev);
 	if (!wil_has_other_active_ifaces(wil, ndev, false, true))
@@ -2062,11 +2112,64 @@ out:
 	return rc;
 }
 
+void wil_cfg80211_ap_recovery(struct wil6210_priv *wil)
+{
+	int rc, i;
+	struct wiphy *wiphy = wil_to_wiphy(wil);
+
+	for (i = 0; i < wil->max_vifs; i++) {
+		struct wil6210_vif *vif = wil->vifs[i];
+		struct net_device *ndev;
+		struct cfg80211_beacon_data bcon = {};
+		struct key_params key_params = {};
+
+		if (!vif || vif->ssid_len == 0)
+			continue;
+
+		ndev = vif_to_ndev(vif);
+		bcon.proberesp_ies = vif->proberesp_ies;
+		bcon.assocresp_ies = vif->assocresp_ies;
+		bcon.probe_resp = vif->proberesp;
+		bcon.proberesp_ies_len = vif->proberesp_ies_len;
+		bcon.assocresp_ies_len = vif->assocresp_ies_len;
+		bcon.probe_resp_len = vif->proberesp_len;
+
+		wil_info(wil,
+			 "AP (vif %d) recovery: privacy %d, bi %d, channel %d, hidden %d, pbss %d\n",
+			 i, vif->privacy, vif->bi, vif->channel,
+			 vif->hidden_ssid, vif->pbss);
+		wil_hex_dump_misc("SSID ", DUMP_PREFIX_OFFSET, 16, 1,
+				  vif->ssid, vif->ssid_len, true);
+		rc = _wil_cfg80211_start_ap(wiphy, ndev,
+					    vif->ssid, vif->ssid_len,
+					    vif->privacy, vif->bi,
+					    vif->channel, &bcon,
+					    vif->hidden_ssid, vif->pbss);
+		if (rc) {
+			wil_err(wil, "vif %d recovery failed (%d)\n", i, rc);
+			continue;
+		}
+
+		if (!vif->privacy || vif->gtk_len == 0)
+			continue;
+
+		key_params.key = vif->gtk;
+		key_params.key_len = vif->gtk_len;
+		key_params.seq_len = IEEE80211_GCMP_PN_LEN;
+		rc = wil_cfg80211_add_key(wiphy, ndev, vif->gtk_index, false,
+					  NULL, &key_params);
+		if (rc)
+			wil_err(wil, "vif %d recovery add key failed (%d)\n",
+				i, rc);
+	}
+}
+
 static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 				      struct net_device *ndev,
 				      struct cfg80211_beacon_data *bcon)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
+	struct wireless_dev *wdev = ndev->ieee80211_ptr;
 	struct wil6210_vif *vif = ndev_to_vif(ndev);
 	int rc;
 	u32 privacy = 0;
@@ -2079,15 +2182,16 @@ static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 			     bcon->tail_len))
 		privacy = 1;
 
+	memcpy(vif->ssid, wdev->ssid, wdev->ssid_len);
+	vif->ssid_len = wdev->ssid_len;
+
 	/* in case privacy has changed, need to restart the AP */
 	if (vif->privacy != privacy) {
-		struct wireless_dev *wdev = ndev->ieee80211_ptr;
-
 		wil_dbg_misc(wil, "privacy changed %d=>%d. Restarting AP\n",
 			     vif->privacy, privacy);
 
-		rc = _wil_cfg80211_start_ap(wiphy, ndev, wdev->ssid,
-					    wdev->ssid_len, privacy,
+		rc = _wil_cfg80211_start_ap(wiphy, ndev, vif->ssid,
+					    vif->ssid_len, privacy,
 					    wdev->beacon_interval,
 					    vif->channel, bcon,
 					    vif->hidden_ssid,
@@ -2177,6 +2281,12 @@ static int wil_cfg80211_stop_ap(struct wiphy *wiphy,
 
 	wmi_pcp_stop(vif);
 	clear_bit(wil_vif_ft_roam, vif->status);
+	vif->ssid_len = 0;
+	wil_memdup_ie(&vif->proberesp, &vif->proberesp_len, NULL, 0);
+	wil_memdup_ie(&vif->proberesp_ies, &vif->proberesp_ies_len, NULL, 0);
+	wil_memdup_ie(&vif->assocresp_ies, &vif->assocresp_ies_len, NULL, 0);
+	memset(vif->gtk, 0, WMI_MAX_KEY_LEN);
+	vif->gtk_len = 0;
 
 	if (last)
 		__wil_down(wil);
@@ -2224,7 +2334,7 @@ static int wil_cfg80211_del_station(struct wiphy *wiphy,
 		     params->mac, params->reason_code, vif->mid);
 
 	mutex_lock(&wil->mutex);
-	wil6210_disconnect(vif, params->mac, params->reason_code, false);
+	wil6210_disconnect(vif, params->mac, params->reason_code);
 	mutex_unlock(&wil->mutex);
 
 	return 0;
@@ -3487,6 +3597,23 @@ static int wil_nl_60g_handle_cmd(struct wiphy *wiphy, struct wireless_dev *wdev,
 
 			wil_dbg_wmi(wil, "force sending wmi commands %d\n",
 				    wil->force_wmi_send);
+			break;
+		case NL_60G_GEN_FW_RESET:
+			if (!test_bit(WMI_FW_CAPABILITY_WMI_ONLY,
+				      wil->fw_capabilities)) {
+				rc = -EOPNOTSUPP;
+				break;
+			}
+
+			wil_dbg_misc(wil,
+				     "NL_60G_GEN_FW_RESET, resetting...\n");
+
+			mutex_lock(&wil->mutex);
+			down_write(&wil->mem_lock);
+			rc = wil_reset(wil, true);
+			up_write(&wil->mem_lock);
+			mutex_unlock(&wil->mutex);
+
 			break;
 		default:
 			rc = -EINVAL;
