@@ -29,3 +29,7 @@ ifeq ($(CONFIG_SEC_BEYONDXQ_PROJECT),y)
 five_sign_runtype := qc_secimg50_tzapp
 five_sign_model := QSEE_SM8150_FUSION_TA
 endif
+ifeq ($(CONFIG_SEC_WINNERX_PROJECT),y)
+five_sign_runtype := qc_secimg50_tzapp
+five_sign_model := QSEE_SM8150_FUSION_TA
+endif
